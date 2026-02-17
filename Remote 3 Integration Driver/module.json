@@ -1,0 +1,19 @@
+{
+    "id": "{F1806E92-8367-82DB-1454-55E85CC85CD6}",
+    "name": "Remote 3 Integration Driver",
+    "type": 2,
+    "vendor": "Unfolded Circle",
+    "aliases": [],
+    "parentRequirements": [
+        "{C8792760-65CF-4C53-B5C7-A30FCC84FEFE}"
+    ],
+    "childRequirements": [
+        "{34A21C2C-646B-1014-D032-DF7E7A88B419}"
+    ],
+    "implemented": [
+        "{5CC29F3B-5B01-6071-177F-54C460B2F92C}",
+        "{7A1272A4-CBDB-46EF-BFC6-DCF4A53D2FC7}"
+    ],
+    "prefix": "UCR",
+    "url": "https://www.unfoldedcircle.com"
+}

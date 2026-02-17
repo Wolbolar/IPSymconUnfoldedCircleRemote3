@@ -1,0 +1,19 @@
+{
+    "id": "{C810D534-2395-7C43-D0BE-6DEC069B2516}",
+    "name": "Remote 3 Core Manager",
+    "type": 2,
+    "vendor": "Unfolded Circle",
+    "aliases": [],
+    "parentRequirements": [
+        "{79827379-F36E-4ADA-8A95-5F8D1DC92FA9}"
+    ],
+    "childRequirements": [
+        "{76BD37C4-C1A4-AA3A-4AFF-599D64F5E989}"
+    ],
+    "implemented": [
+        "{AC2A1323-0258-76DC-5AA8-9B0C092820A5}",
+        "{018EF6B5-AB94-40C6-AA53-46943E824ACF}"
+    ],
+    "prefix": "UCR",
+    "url": "https://www.unfoldedcircle.com"
+}

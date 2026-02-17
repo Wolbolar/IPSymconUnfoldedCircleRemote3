@@ -1,0 +1,19 @@
+{
+    "id": "{9CD1AA03-841E-FB97-8E32-6536A1D4561B}",
+    "name": "Remote 3 Dock Manager",
+    "type": 2,
+    "vendor": "Unfolded Circle",
+    "aliases": [],
+    "parentRequirements": [
+        "{79827379-F36E-4ADA-8A95-5F8D1DC92FA9}"
+    ],
+    "childRequirements": [
+        "{B65C3047-2C25-5859-A9D6-7408B791CDCD}"
+    ],
+    "implemented": [
+        "{F975667E-3B5A-0148-4A47-CB4CD513EAD8}",
+        "{018EF6B5-AB94-40C6-AA53-46943E824ACF}"
+    ],
+    "prefix": "UCR",
+    "url": "https://www.unfoldedcircle.com"
+}

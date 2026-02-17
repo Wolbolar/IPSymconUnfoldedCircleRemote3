@@ -1,0 +1,16 @@
+{
+    "id": "{5894A8B3-7E60-981A-B3BA-6647335B57E4}",
+    "name": "Remote 3 Device",
+    "type": 3,
+    "vendor": "Unfolded Circle",
+    "aliases": [],
+    "parentRequirements": [
+        "{AC2A1323-0258-76DC-5AA8-9B0C092820A5}"
+    ],
+    "childRequirements": [],
+    "implemented": [
+        "{76BD37C4-C1A4-AA3A-4AFF-599D64F5E989}"
+    ],
+    "prefix": "UCR",
+    "url": "https://www.unfoldedcircle.com"
+}
