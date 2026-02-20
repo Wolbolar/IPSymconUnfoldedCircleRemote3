@@ -4008,7 +4008,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 // Fallback: Host aus der Remote-Instanz verwenden
                 $hostValue = $ip;
             }
-
+            $this->SendDebugExtended(__FUNCTION__, "🔍 Registriere Treiber bei $ip (Symcon Host: $hostValue)", 0);
+            $this->SendDebugExtended(__FUNCTION__, "📡 API-Key: $apiKey | Token: $token", 0);
             $payload = [
                 'driver_id' => 'symcon-unfoldedcircle',
                 'name' => [
