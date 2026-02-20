@@ -2,21 +2,21 @@
 
 declare(strict_types=1);
 
-class Remote3Configurator extends IPSModule
+class Remote3Configurator extends IPSModuleStrict
 {
-    public function Create()
+    public function Create(): void
     {
         //Never delete this line!
         parent::Create();
     }
 
-    public function Destroy()
+    public function Destroy(): void
     {
         //Never delete this line!
         parent::Destroy();
     }
 
-    public function ApplyChanges()
+    public function ApplyChanges(): void
     {
         //Never delete this line!
         parent::ApplyChanges();
@@ -27,7 +27,7 @@ class Remote3Configurator extends IPSModule
      *
      * @return string
      */
-    public function GetConfigurationForm()
+    public function GetConfigurationForm(): string
     {
         // return current form
         return json_encode(
@@ -43,7 +43,7 @@ class Remote3Configurator extends IPSModule
      *
      * @return array
      */
-    protected function FormHead()
+    protected function FormHead(): array
     {
         $form = [];
         return $form;
@@ -54,7 +54,7 @@ class Remote3Configurator extends IPSModule
      *
      * @return array
      */
-    protected function FormActions()
+    protected function FormActions(): array
     {
         $form = [];
         return $form;
@@ -65,7 +65,7 @@ class Remote3Configurator extends IPSModule
      *
      * @return array
      */
-    protected function FormStatus()
+    protected function FormStatus(): array
     {
         $form = [
             [

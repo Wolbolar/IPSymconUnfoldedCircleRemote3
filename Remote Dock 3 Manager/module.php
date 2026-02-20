@@ -2,62 +2,117 @@
 
 declare(strict_types=1);
 
-class Remote3DockManager extends IPSModule
+class Remote3DockManager extends IPSModuleStrict
 {
+    // Dock WebSocket API (UCD2/UCD3) defaults
+    const DEFAULT_WS_PROTOCOL = 'ws://';
+    const DEFAULT_WS_PORT = 80; // 946 ?
+
+    // Most docks expose the API on the root path (no /ws). Keep as empty string.
+    const DEFAULT_WS_PATH = '/ws';
+
+    // DataID for forwarding Dock data to child instances.
+    // Must match Dock Manager `childRequirements` and Dock Child `implemented`.
+    const DOCK_CHILD_DATAID = '{B65C3047-2C25-5859-A9D6-7408B791CDCD}';
+
+    public function GetCompatibleParents(): string
+    {
+        // Require the WebSocket Client as parent
+        return json_encode([
+            'type' => 'require',
+            'moduleIDs' => [
+                '{D68FD31F-0E90-7019-F16C-1949BD3079EF}'
+            ]
+        ]);
+    }
+
     private function EnsureApiKey(): bool
     {
+        // Dock-API does not expose the same REST API as remote-core for generating API keys.
+        // The Dock WebSocket API authenticates with an access token sent via an `auth` message.
+        // We store that token in `api_key` attribute for reuse.
+
         $apiKey = $this->ReadAttributeString('api_key');
-        if ($apiKey != '') {
+        if ($apiKey !== '') {
             return true;
+        }
+
+        // Prefer pulling token/API key from the selected Remote 3 Core instance
+        $coreInstanceId = (int)$this->ReadPropertyInteger('core_instance_id');
+        if ($coreInstanceId > 0) {
+            $this->SendDebug(__FUNCTION__, '🔑 Trying to fetch API key from selected Remote 3 Core instance #' . $coreInstanceId . '…', 0);
+            $this->UpdateApiKeyFromCore($coreInstanceId);
+            $apiKey = $this->ReadAttributeString('api_key');
+            if ($apiKey !== '') {
+                return true;
+            }
+            $this->SendDebug(__FUNCTION__, '⚠️ Could not fetch API key from Remote 3 Core. Falling back to manual token field.', 0);
         }
 
         $host = $this->ReadPropertyString('host');
-        $url = "http://$host/api/auth/api_keys";
-        $user = $this->ReadPropertyString('web_config_user');
-        $pass = $this->ReadPropertyString('web_config_pass');
+        $token = $this->ReadPropertyString('web_config_pass');
 
-        $headers = ['Content-Type: application/json'];
-        $body = json_encode([
-            'name' => 'Symcon Remote Access',
-            'scopes' => ['admin'],
-            'description' => 'Created from Symcon module'
-        ]);
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_USERPWD => $user . ':' . $pass,
-            CURLOPT_POSTFIELDS => $body,
-            CURLOPT_POST => true,
-            CURLOPT_TIMEOUT => 10
-        ]);
-
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        $this->SendDebug(__FUNCTION__, "📥 HTTP-Code: $httpCode", 0);
-        $this->SendDebug(__FUNCTION__, "📥 Response: $response", 0);
-
-        if ($error !== '') {
-            $this->SendDebug(__FUNCTION__, "❌ CURL Error: $error", 0);
+        if ($host === '' || $token === '') {
+            $this->SendDebug(__FUNCTION__, '⏸️ Token not available yet (Host/Token missing).', 0);
             return false;
         }
 
-        $data = json_decode($response, true);
-        if (isset($data['api_key'])) {
-            $this->WriteAttributeString('api_key', $data['api_key']);
-            $this->SendDebug(__FUNCTION__, '✅ API-Key gespeichert.', 0);
-            return true;
-        }
-
-        $this->SendDebug(__FUNCTION__, '❌ Kein API-Key erhalten.', 0);
-        return false;
+        // Treat the entered password field as Dock access token.
+        $this->WriteAttributeString('api_key', $token);
+        $this->SendDebug(__FUNCTION__, '✅ Token stored for Dock WebSocket authentication.', 0);
+        return true;
     }
 
-    public function Create()
+    /**
+     * Fetch API key from the selected Remote 3 Core instance and store it in this instance.
+     * The selected instance must provide the public function UCR_GetApiKey(int $id): string.
+     */
+    public function UpdateApiKeyFromCore(int $coreInstanceId = 0): void
+    {
+        if ($coreInstanceId <= 0) {
+            $coreInstanceId = (int)$this->ReadPropertyInteger('core_instance_id');
+        }
+
+        if ($coreInstanceId <= 0 || !@IPS_InstanceExists($coreInstanceId)) {
+            $this->SendDebug(__FUNCTION__, '⏸️ No valid Remote 3 Core instance selected.', 0);
+            return;
+        }
+
+        // Verify function exists in the system (provided by the Remote 3 Core module)
+        if (!function_exists('UCR_GetApiKey')) {
+            $this->SendDebug(__FUNCTION__, '❌ Function UCR_GetApiKey() not found. Please ensure the Remote 3 Core module is installed/loaded.', 0);
+            return;
+        }
+
+        try {
+            $apiKey = (string)@UCR_GetApiKey($coreInstanceId);
+        } catch (Throwable $e) {
+            $this->SendDebug(__FUNCTION__, '❌ Error calling UCR_GetApiKey: ' . $e->getMessage(), 0);
+            return;
+        }
+
+        $apiKey = trim($apiKey);
+        if ($apiKey === '') {
+            $this->SendDebug(__FUNCTION__, '⚠️ Remote 3 Core returned an empty API key.', 0);
+            return;
+        }
+
+        $this->WriteAttributeString('api_key', $apiKey);
+        $this->SendDebug(__FUNCTION__, '✅ API key updated from Remote 3 Core instance #' . $coreInstanceId, 0);
+
+        if (method_exists($this, 'ReloadForm')) {
+            $this->ReloadForm();
+        }
+
+        // Optionally trigger parent WS client reconfiguration
+        $parentID = IPS_GetInstance($this->InstanceID)['ConnectionID'] ?? 0;
+        if (is_int($parentID) && $parentID > 0) {
+            $this->SendDebug(__FUNCTION__, '🔄 Triggering parent ApplyChanges (after API key update)…', 0);
+            @IPS_ApplyChanges($parentID);
+        }
+    }
+
+    public function Create(): void
     {
         //Never delete this line!
         parent::Create();
@@ -65,83 +120,724 @@ class Remote3DockManager extends IPSModule
         $this->RegisterAttributeString('api_key', '');
         $this->RegisterAttributeString('auth_mode', '');
         $this->RegisterPropertyString('hostname', '');
+        $this->RegisterPropertyInteger('core_instance_id', 0);
         $this->RegisterPropertyString('host', '');
         $this->RegisterPropertyString('port', '');
         $this->RegisterPropertyString('https_port', '');
-        $this->RegisterPropertyString('ws_path', '');
-        $this->RegisterPropertyString('ws_port', '');
+        $this->RegisterPropertyString('ws_path', self::DEFAULT_WS_PATH);
+        $this->RegisterPropertyString('ws_port', (string)self::DEFAULT_WS_PORT);
         $this->RegisterPropertyString('ws_host', '');
         $this->RegisterPropertyString('ws_https_port', '');
         $this->RegisterPropertyString('ws_https_host', '');
         $this->RegisterAttributeString('ws_auth_mode', '');
         $this->RegisterAttributeString('ws_api_key', '');
+        $this->RegisterAttributeString('sysinfo_raw', '');
+        $this->RegisterAttributeString('sysinfo_last_req_id', '');
+        $this->RegisterAttributeInteger('dock_msg_id', 0);
 
         $this->RegisterPropertyString('web_config_user', 'web-configurator');
         $this->RegisterPropertyString('web_config_pass', '');
-
-
-        $this->ConnectParent('{D68FD31F-0E90-7019-F16C-1949BD3079EF}'); // Websocket Client
 
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
     }
 
-    public function Destroy()
+    public function Destroy(): void
     {
         //Never delete this line!
         parent::Destroy();
     }
 
-    public function ApplyChanges()
+    public function ApplyChanges(): void
     {
         //Never delete this line!
         parent::ApplyChanges();
 
+        $host = $this->ReadPropertyString('host');
+        $pass = $this->ReadPropertyString('web_config_pass');
+
+        // If setup is incomplete, keep module inactive and do not touch parent configuration.
+        if ($host === '' || $pass === '') {
+            $this->SendDebug(__FUNCTION__, '⏸️ Setup incomplete (Host/Password missing) – waiting for user input.', 0);
+            $this->SetStatus(IS_INACTIVE);
+            if (method_exists($this, 'ReloadForm')) {
+                $this->ReloadForm();
+            }
+            return;
+        }
+
+        // Setup seems complete – ensure Dock access token exists.
+        $this->SendDebug(__FUNCTION__, '🔐 Setup complete – ensuring Dock access token…', 0);
+        $ok = $this->EnsureApiKey();
+
+        // Update the API key display in the form
+        if (method_exists($this, 'ReloadForm')) {
+            $this->ReloadForm();
+        }
+
+        if (!$ok) {
+            $this->SendDebug(__FUNCTION__, '⏸️ Token not available yet – parent WS config will remain dummy.', 0);
+            $this->SetStatus(IS_INACTIVE);
+            return;
+        }
+
+        // We have an API key; mark active and trigger parent to fetch fresh configuration.
+        $this->SetStatus(IS_ACTIVE);
+
+        $parentID = IPS_GetInstance($this->InstanceID)['ConnectionID'] ?? 0;
+        if (is_int($parentID) && $parentID > 0) {
+            $this->SendDebug(__FUNCTION__, '🔄 Triggering parent ApplyChanges to update WS configuration (API-Key/Headers)…', 0);
+            @IPS_ApplyChanges($parentID);
+        } else {
+            $this->SendDebug(__FUNCTION__, '⚠️ No parent connected yet – cannot trigger WS client reconfiguration.', 0);
+        }
     }
 
-    public function ForwardData($JSONString)
+    public function GetConfigurationForParent(): string
     {
-        $this->SendDebug(__FUNCTION__, '📥 Eingehende Daten: ' . $JSONString, 0);
+        $host = $this->ReadPropertyString('host');
+        $pass = $this->ReadPropertyString('web_config_pass');
 
-        $data = json_decode($JSONString);
+        // If setup is incomplete (host and/or token missing), still configure the WS client URL
+        // with the best-known host so the parent does not show a misleading 127.0.0.1.
+        // Authentication may happen later once the token becomes available.
+        if ($host === '' || $pass === '') {
+            $this->SendDebug(__FUNCTION__, '⏸️ WS configuration incomplete (Host/Token missing) – using best-known host for URL.', 0);
 
-        // Prüfen, ob ein Buffer existiert
+            $urlHost = ($host !== '') ? $host : '127.0.0.1';
+
+            $config = [
+                'URL' => self::DEFAULT_WS_PROTOCOL . $urlHost . ':' . self::DEFAULT_WS_PORT . self::DEFAULT_WS_PATH,
+                'VerifyCertificate' => false,
+                'Type' => 0,
+                'Headers' => json_encode([])
+            ];
+
+            return json_encode($config);
+        }
+
+        // Ensure we have a valid API key once host+pass are present.
+        $apiKey = $this->ReadAttributeString('api_key');
+        if ($apiKey === '') {
+            $this->SendDebug(__FUNCTION__, '🔐 No API key yet – trying to create/validate API key…', 0);
+            if (!$this->EnsureApiKey()) {
+                $this->SendDebug(__FUNCTION__, '⏸️ WS configuration postponed (API key not available).', 0);
+
+                $urlHost = ($host !== '') ? $host : '127.0.0.1';
+                $port = (int)$this->ReadPropertyString('ws_port');
+                if ($port <= 0) {
+                    $port = self::DEFAULT_WS_PORT;
+                }
+                $path = $this->ReadPropertyString('ws_path');
+                if ($path === '') {
+                    $path = self::DEFAULT_WS_PATH;
+                }
+
+                $config = [
+                    'URL' => self::DEFAULT_WS_PROTOCOL . $urlHost . ':' . self::DEFAULT_WS_PORT . self::DEFAULT_WS_PATH,
+                    'VerifyCertificate' => false,
+                    'Type' => 0,
+                    'Headers' => json_encode([])
+                ];
+
+                return json_encode($config);
+            }
+            $apiKey = $this->ReadAttributeString('api_key');
+        }
+
+        // Dock authenticates with an `auth` message, not via HTTP headers.
+        $config = [
+            'URL' => self::DEFAULT_WS_PROTOCOL . $host . ':' . self::DEFAULT_WS_PORT . self::DEFAULT_WS_PATH,
+            'VerifyCertificate' => false,
+            'Type' => 0,
+            'Headers' => json_encode([])
+        ];
+
+        $this->SendDebug(__FUNCTION__, '🧩 WS Configuration: ' . json_encode($config), 0);
+        return json_encode($config);
+    }
+
+    public function UpdateWSClient(): void
+    {
+        $parentID = IPS_GetInstance($this->InstanceID)['ConnectionID'] ?? 0;
+        if (!is_int($parentID) || $parentID <= 0) {
+            $this->SendDebug(__FUNCTION__, '❌ No parent WebSocket Client connected (ConnectionID is empty).', 0);
+            return;
+        }
+
+        // Build the config exactly like the parent would request it.
+        $configJson = $this->GetConfigurationForParent();
+        $cfg = json_decode($configJson, true);
+        if (!is_array($cfg)) {
+            $this->SendDebug(__FUNCTION__, '❌ Invalid parent configuration JSON: ' . $configJson, 0);
+            return;
+        }
+
+        // WebSocket Client (Symcon) uses these configuration keys:
+        // {"Active":false,"Headers":"[]","Type":0,"URL":"ws://<ip>:<port>/<path>","VerifyCertificate":false}
+        $this->SendDebug(__FUNCTION__, '🔧 Applying WS client configuration to parent…', 0);
+        $this->SendDebug(__FUNCTION__, 'ParentID: ' . $parentID, 0);
+        $this->SendDebug(__FUNCTION__, 'Config: ' . json_encode($cfg), 0);
+
+        // Apply required properties
+        if (array_key_exists('URL', $cfg)) {
+            $this->SendDebug(__FUNCTION__, '➡️ IPS_SetProperty(URL): ' . (string)$cfg['URL'], 0);
+            @IPS_SetProperty($parentID, 'URL', (string)$cfg['URL']);
+        }
+
+        if (array_key_exists('VerifyCertificate', $cfg)) {
+            $this->SendDebug(__FUNCTION__, '➡️ IPS_SetProperty(VerifyCertificate): ' . json_encode((bool)$cfg['VerifyCertificate']), 0);
+            @IPS_SetProperty($parentID, 'VerifyCertificate', (bool)$cfg['VerifyCertificate']);
+        }
+
+        if (array_key_exists('Type', $cfg)) {
+            $this->SendDebug(__FUNCTION__, '➡️ IPS_SetProperty(Type): ' . json_encode((int)$cfg['Type']), 0);
+            @IPS_SetProperty($parentID, 'Type', (int)$cfg['Type']);
+        }
+
+        if (array_key_exists('Headers', $cfg)) {
+            // Headers must be a JSON string (e.g. "[]")
+            $headers = $cfg['Headers'];
+            if (is_array($headers)) {
+                $headers = json_encode($headers);
+            }
+            $headers = (string)$headers;
+            $this->SendDebug(__FUNCTION__, '➡️ IPS_SetProperty(Headers): ' . $headers, 0);
+            @IPS_SetProperty($parentID, 'Headers', $headers);
+        }
+
+        // Enable the WS client (Symcon uses property name "Active")
+        $this->SendDebug(__FUNCTION__, '➡️ IPS_SetProperty(Active): true', 0);
+        @IPS_SetProperty($parentID, 'Active', true);
+
+        $this->SendDebug(__FUNCTION__, '🔄 Calling IPS_ApplyChanges on parent…', 0);
+        @IPS_ApplyChanges($parentID);
+
+        // Log the resulting parent configuration for troubleshooting
+        $finalCfg = @IPS_GetConfiguration($parentID);
+        if (is_string($finalCfg) && $finalCfg !== '') {
+            $this->SendDebug(__FUNCTION__, '✅ Parent configuration after ApplyChanges: ' . $finalCfg, 0);
+        }
+    }
+
+    // --- Dock WebSocket API helpers -------------------------------------------------
+
+    private function NextDockMsgId(): int
+    {
+        $id = (int)$this->ReadAttributeInteger('dock_msg_id');
+        $id++;
+        // Keep it in a sane range
+        if ($id < 0 || $id > 2147483000) {
+            $id = 1;
+        }
+        $this->WriteAttributeInteger('dock_msg_id', $id);
+        return $id;
+    }
+
+    /**
+     * Send a Dock API message that uses the `command` field (most requests).
+     *
+     * Payload format per AsyncAPI examples:
+     *   {"type":"dock","id":<int>,"command":"...", ...}
+     */
+    private function SendDockCommand(string $command, array $fields = []): void
+    {
+        $payload = array_merge(
+            [
+                'type' => 'dock',
+                'id' => $this->NextDockMsgId(),
+                'command' => $command
+            ],
+            $fields
+        );
+
+        $this->SendDebug(__FUNCTION__, '➡️ Sending dock command: ' . json_encode($payload, JSON_UNESCAPED_SLASHES), 0);
+        $this->SendToWebSocket($payload);
+    }
+
+    /**
+     * Send a Dock API message that uses the `msg` field (e.g. ping).
+     *
+     * Payload format per AsyncAPI examples:
+     *   {"type":"dock","msg":"ping"}
+     */
+    private function SendDockMsg(string $msg, array $fields = []): void
+    {
+        $payload = array_merge(
+            [
+                'type' => 'dock',
+                'msg' => $msg
+            ],
+            $fields
+        );
+
+        $this->SendDebug(__FUNCTION__, '➡️ Sending dock msg: ' . json_encode($payload, JSON_UNESCAPED_SLASHES), 0);
+        $this->SendToWebSocket($payload);
+    }
+
+    // --- Dock WebSocket API: documented requests -----------------------------------
+
+    /** Ping the dock (no authentication required). */
+    public function Ping(): void
+    {
+        $this->SendDockMsg('ping');
+    }
+
+    /**
+     * Perform a system command.
+     * Allowed values (per docs):
+     * ir_receive_on, ir_receive_off, remote_charged, remote_lowbattery, remote_normal, identify, reboot, reset
+     */
+    public function SystemCommand(string $command): void
+    {
+        $command = trim($command);
+        if ($command === '') {
+            $this->SendDebug(__FUNCTION__, '❌ Empty command.', 0);
+            return;
+        }
+        $this->SendDockCommand($command);
+    }
+
+    /** Get system information (no authentication required). */
+    public function GetSysInfo(): void
+    {
+        // Use the documented command message format.
+        $this->SendDockCommand('get_sysinfo');
+    }
+
+    /** Stop a currently repeating IR transmission. */
+    public function IRStop(): void
+    {
+        $this->SendDockCommand('ir_stop');
+    }
+
+    /**
+     * Send an IR code.
+     *
+     * @param string $code IR code (Unfolded Circle hex or Pronto)
+     * @param string $format 'hex' or 'pronto'
+     * @param int $repeat Optional repeat value (0..20)
+     * @param array $outputs Optional outputs, e.g. ['int_side'=>true,'int_top'=>true,'ext1'=>true,'ext2'=>true]
+     * @param int $featureFlags Optional feature flags (field `f`)
+     * @param int $holdMs Optional hold duration in ms (if supported by dock feature flags)
+     */
+    public function IRSend(string $code, string $format = 'hex', int $repeat = 0, array $outputs = [], int $featureFlags = 0, int $holdMs = 0): void
+    {
+        $code = trim($code);
+        if ($code === '') {
+            $this->SendDebug(__FUNCTION__, '❌ Empty IR code.', 0);
+            return;
+        }
+
+        $format = strtolower(trim($format));
+        if ($format !== 'hex' && $format !== 'pronto') {
+            $format = 'hex';
+        }
+
+        $fields = [
+            'code' => $code,
+            'format' => $format,
+            'repeat' => $repeat,
+            'f' => $featureFlags
+        ];
+
+        // Optional hold (only if caller provided > 0)
+        if ($holdMs > 0) {
+            $fields['hold'] = $holdMs;
+        }
+
+        // Optional outputs (bool flags)
+        foreach (['int_side', 'int_top', 'ext1', 'ext2'] as $k) {
+            if (array_key_exists($k, $outputs)) {
+                $fields[$k] = (bool)$outputs[$k];
+            }
+        }
+
+        $this->SendDockCommand('ir_send', $fields);
+    }
+
+    /**
+     * Set LED brightness.
+     *
+     * @param int $ledBrightness Main status LED brightness
+     * @param int $ethernetLedBrightness Optional ethernet LED brightness (0 = off)
+     */
+    public function SetBrightness(int $ledBrightness, int $ethernetLedBrightness = -1): void
+    {
+        $fields = [
+            'led_brightness' => $ledBrightness
+        ];
+        if ($ethernetLedBrightness >= 0) {
+            $fields['eth_led_brightness'] = $ethernetLedBrightness;
+        }
+        $this->SendDockCommand('set_brightness', $fields);
+    }
+
+    /** Set speaker volume (0..100 depending on firmware). */
+    public function SetVolume(int $volume): void
+    {
+        $this->SendDockCommand('set_volume', ['volume' => $volume]);
+    }
+
+    /**
+     * Configure dock logging.
+     * This is a thin wrapper; exact fields may differ by firmware version.
+     */
+    public function SetLogging(string $level, bool $enabled = true): void
+    {
+        $level = trim($level);
+        if ($level === '') {
+            $level = 'info';
+        }
+        $this->SendDockCommand('set_logging', ['level' => $level, 'enabled' => $enabled]);
+    }
+
+    /** Get active/supported configuration for a single external port. */
+    public function GetPortMode(int $port): void
+    {
+        $this->SendDockCommand('get_port_mode', ['port' => $port]);
+    }
+
+    /** Get active/supported configuration for all external ports. */
+    public function GetPortModes(): void
+    {
+        $this->SendDockCommand('get_port_modes');
+    }
+
+    /**
+     * Set external port mode.
+     *
+     * @param int $port 1-based port index
+     * @param string $mode Mode string (e.g. AUTO, NONE, IR_BLASTER, TRIGGER_5V, RS232, ...)
+     * @param array $uart Optional UART config for RS232, e.g. ['baud_rate'=>9600,'data_bits'=>8,'stop_bits'=>'1','parity'=>'none']
+     */
+    public function SetPortMode(int $port, string $mode, array $uart = []): void
+    {
+        $fields = [
+            'port' => $port,
+            'mode' => $mode
+        ];
+        if (!empty($uart)) {
+            $fields['uart'] = $uart;
+        }
+        $this->SendDockCommand('set_port_mode', $fields);
+    }
+
+    /**
+     * Configure 5V trigger output for a port.
+     *
+     * @param int $port 1-based port index
+     * @param bool $enabled Enable/disable trigger
+     * @param int $pulseMs Optional pulse duration in ms (0 = continuous, depending on firmware)
+     */
+    public function SetPortTrigger(int $port, bool $enabled, int $pulseMs = 0): void
+    {
+        $fields = [
+            'port' => $port,
+            'enabled' => $enabled
+        ];
+        if ($pulseMs > 0) {
+            $fields['pulse'] = $pulseMs;
+        }
+        $this->SendDockCommand('set_port_trigger', $fields);
+    }
+
+    /** Get current trigger configuration for a port. */
+    public function GetPortTrigger(int $port): void
+    {
+        $this->SendDockCommand('get_port_trigger', ['port' => $port]);
+    }
+
+    /**
+     * Set (partial) dock configuration.
+     * This is a generic wrapper that forwards the given config object as-is.
+     */
+    public function SetConfig(array $config): void
+    {
+        $this->SendDockCommand('set_config', $config);
+    }
+
+    /**
+     * Convenience: send a raw Dock API payload (advanced).
+     * The payload must already follow the Dock schema.
+     */
+    public function SendRawDockPayload(array $payload): void
+    {
+        if (!isset($payload['type'])) {
+            $payload['type'] = 'dock';
+        }
+        $this->SendDebug(__FUNCTION__, '➡️ Sending raw dock payload: ' . json_encode($payload, JSON_UNESCAPED_SLASHES), 0);
+        $this->SendToWebSocket($payload);
+    }
+
+    /**
+     * Triggers Dock WebSocket authentication using a provided access token.
+     * Useful for manual testing from scripts.
+     */
+    public function Authenticate(string $token): void
+    {
+        $token = trim($token);
+        if ($token === '') {
+            $this->SendDebug(__FUNCTION__, '❌ Empty token provided – cannot authenticate.', 0);
+            return;
+        }
+
+        // Store token for reuse
+        $this->WriteAttributeString('api_key', $token);
+        $this->SendDebug(__FUNCTION__, '🔐 Sending auth with provided token (stored in attribute api_key).', 0);
+
+        $this->SendToWebSocket([
+            'type' => 'auth',
+            'token' => $token
+        ]);
+    }
+
+
+    private function SendToWebSocket(array $payload): void
+    {
+        // The WebSocket Client transports payloads as HEX strings (see incoming Buffer).
+        // Therefore we also send HEX-encoded JSON to avoid corrupted frames (NUL bytes).
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            $this->SendDebug(__FUNCTION__, '❌ WS send failed: json_encode returned false.', 0);
+            return;
+        }
+
+        $hex = strtoupper(bin2hex($json));
+
+        $data = [
+            'DataID' => '{79827379-F36E-4ADA-8A95-5F8D1DC92FA9}',
+            'Buffer' => $hex
+        ];
+
+        $this->SendDebug(__FUNCTION__, '➡️ WS send (json): ' . $json, 0);
+        $this->SendDebug(__FUNCTION__, '➡️ WS send (hex,len=' . strlen($hex) . '): ' . substr($hex, 0, 128) . (strlen($hex) > 128 ? '…' : ''), 0);
+        $this->SendDataToParent(json_encode($data));
+    }
+
+    private function ForwardToChildren(array $payload): void
+    {
+        $data = [
+            'DataID' => self::DOCK_CHILD_DATAID,
+            // Children receive readable JSON; no HEX here
+            'Buffer' => json_encode($payload, JSON_UNESCAPED_SLASHES)
+        ];
+        $this->SendDebug(__FUNCTION__, '➡️ Forward to children: ' . $data['Buffer'], 0);
+        $this->SendDataToChildren(json_encode($data));
+    }
+
+    public function ForwardData(string $JSONString): string
+    {
+        $this->SendDebug(__FUNCTION__, '📥 Incoming child data: ' . $JSONString, 0);
+
+        $data = json_decode($JSONString, true);
+        if (!is_array($data)) {
+            $this->SendDebug(__FUNCTION__, '❌ Invalid JSON from child.', 0);
+            return json_encode(['error' => 'Invalid JSON']);
+        }
+
         if (!isset($data['Buffer'])) {
-            $this->SendDebug(__FUNCTION__, '❌ Fehler: Buffer fehlt!', 0);
-            return json_encode(['error' => 'Buffer fehlt']);
+            $this->SendDebug(__FUNCTION__, '❌ Missing Buffer in child envelope.', 0);
+            return json_encode(['error' => 'Missing Buffer']);
         }
 
-        $buffer = is_string($data['Buffer']) ? json_decode($data['Buffer'], true) : $data['Buffer'];
-
-        // Prüfen, ob "method" vorhanden ist
-        if (!isset($buffer['method'])) {
-            $this->SendDebug(__FUNCTION__, '❌ Fehler: Buffer enthält kein "method"-Feld!', 0);
-            return json_encode(['error' => 'method fehlt im Buffer']);
+        // Child sends Buffer as JSON string
+        $bufferRaw = $data['Buffer'];
+        $buffer = null;
+        if (is_string($bufferRaw)) {
+            $buffer = json_decode($bufferRaw, true);
+            if (!is_array($buffer)) {
+                // Sometimes Symcon already passes an array-like string; fallback to treating it as plain text
+                $this->SendDebug(__FUNCTION__, '⚠️ Buffer is not JSON – raw: ' . $bufferRaw, 0);
+            }
+        } elseif (is_array($bufferRaw)) {
+            $buffer = $bufferRaw;
         }
 
-        $method = $buffer['method'];
-        $this->SendDebug(__FUNCTION__, "➡️ Verarbeite Methode: $method", 0);
-
-        switch ($method) {
-            case 'CallGetVersion':
-                return $this->CallGetVersion($buffer);
-            default:
-                $this->SendDebug(__FUNCTION__, "⚠️ Unbekannte Methode: $method", 0);
-                return json_encode(['error' => 'Unbekannte Methode']);
+        if (!is_array($buffer)) {
+            return json_encode(['error' => 'Invalid Buffer']);
         }
-        // $this->SendDataToParent(json_encode(['DataID' => '{79827379-F36E-4ADA-8A95-5F8D1DC92FA9}', 'Buffer' => $data->Buffer]));
+
+        // New request style from Dock child: {"action":"get_sysinfo"}
+        $action = (string)($buffer['action'] ?? '');
+        if ($action !== '') {
+            $this->SendDebug(__FUNCTION__, '➡️ Handling action: ' . $action, 0);
+            switch ($action) {
+                case 'get_sysinfo':
+                    // Trigger the actual WS request; response will arrive via ReceiveData and be forwarded to children.
+                    $this->GetSysInfo();
+                    return '';
+
+                default:
+                    $this->SendDebug(__FUNCTION__, '⚠️ Unknown action: ' . $action, 0);
+                    return json_encode(['error' => 'Unknown action']);
+            }
+        }
+
+        // Backward compatibility: old style {"method":"..."}
+        $method = (string)($buffer['method'] ?? '');
+        if ($method !== '') {
+            $this->SendDebug(__FUNCTION__, '➡️ Handling legacy method: ' . $method, 0);
+            switch ($method) {
+                case 'CallGetVersion':
+                    // Legacy placeholder; no-op for Dock Manager
+                    $this->SendDebug(__FUNCTION__, 'ℹ️ Legacy CallGetVersion requested – not implemented for Dock Manager.', 0);
+                    return '';
+                default:
+                    $this->SendDebug(__FUNCTION__, '⚠️ Unknown legacy method: ' . $method, 0);
+                    return json_encode(['error' => 'Unknown method']);
+            }
+        }
+
+        $this->SendDebug(__FUNCTION__, '⚠️ No action/method provided in child request.', 0);
+        return json_encode(['error' => 'No action']);
     }
 
-    public function ReceiveData($JSONString)
+    public function ReceiveData(string $JSONString): string
     {
-        $this->SendDebug(__FUNCTION__, $JSONString, 0);
-        $data = json_decode($JSONString);
+        $this->SendDebug(__FUNCTION__, '📥 Envelope: ' . $JSONString, 0);
 
+        $envelope = json_decode($JSONString, true);
+        if (!is_array($envelope) || !isset($envelope['Buffer'])) {
+            $this->SendDebug(__FUNCTION__, '⚠️ Invalid envelope (missing Buffer).', 0);
+            return '';
+        }
 
-        // $this->SendDataToChildren(json_encode(['DataID' => '{76BD37C4-C1A4-AA3A-4AFF-599D64F5E989}', 'Buffer' => $data->Buffer]));
+        $raw = $envelope['Buffer'];
+
+        // 1) Raw debug
+        if (is_string($raw)) {
+            $this->SendDebug(__FUNCTION__, '📥 Buffer (string) length=' . strlen($raw), 0);
+            // Avoid logging extremely long buffers verbatim; log a safe prefix
+            $this->SendDebug(__FUNCTION__, '📥 Buffer (string, prefix): ' . substr($raw, 0, 256) . (strlen($raw) > 256 ? '…' : ''), 0);
+        } else {
+            $this->SendDebug(__FUNCTION__, '📥 Buffer (non-string): ' . json_encode($raw), 0);
+        }
+
+        $payload = null;
+
+        // 2) Try JSON decode directly if Buffer is a JSON string
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $payload = $decoded;
+                $this->SendDebug(__FUNCTION__, '✅ Buffer is JSON (direct).', 0);
+            }
+        } elseif (is_array($raw)) {
+            // Some IOs may already provide the payload as array
+            $payload = $raw;
+            $this->SendDebug(__FUNCTION__, '✅ Buffer is array (already decoded).', 0);
+        }
+
+        // 3) If not JSON, check if Buffer is HEX-encoded JSON (what you currently see in debug)
+        if ($payload === null && is_string($raw)) {
+            $maybeHex = $raw;
+            $isHex = (strlen($maybeHex) % 2 === 0) && (strlen($maybeHex) >= 2) && ctype_xdigit($maybeHex);
+            if ($isHex) {
+                $this->SendDebug(__FUNCTION__, 'ℹ️ Buffer looks like HEX – attempting hex2bin + JSON decode.', 0);
+                $bin = @hex2bin($maybeHex);
+                if ($bin !== false) {
+                    $this->SendDebug(__FUNCTION__, '📥 Buffer (hex2bin) length=' . strlen($bin), 0);
+                    $this->SendDebug(__FUNCTION__, '📥 Buffer (hex2bin, prefix): ' . substr($bin, 0, 256) . (strlen($bin) > 256 ? '…' : ''), 0);
+                    $decoded = json_decode($bin, true);
+                    if (is_array($decoded)) {
+                        $payload = $decoded;
+                        $this->SendDebug(__FUNCTION__, '✅ Buffer decoded from HEX JSON.', 0);
+                    } else {
+                        $this->SendDebug(__FUNCTION__, '⚠️ HEX decoded but JSON parse failed. Raw(bin) prefix logged above.', 0);
+                    }
+                } else {
+                    $this->SendDebug(__FUNCTION__, '⚠️ hex2bin failed (invalid HEX).', 0);
+                }
+            }
+        }
+
+        // 4) If still unknown, log and stop
+        if (!is_array($payload)) {
+            $this->SendDebug(__FUNCTION__, '⚠️ Payload could not be decoded (neither JSON nor HEX-JSON).', 0);
+            return '';
+        }
+
+        $this->SendDebug(__FUNCTION__, '📥 Payload (decoded): ' . json_encode($payload), 0);
+
+        // Forward every decoded dock message to child instances (children can filter by msg/type)
+        $this->ForwardToChildren($payload);
+
+        // Dock WebSocket API: server sends `auth_required` right after connect.
+        // We must respond with `{"type":"auth","token":"..."}`.
+        if (($payload['type'] ?? '') === 'auth_required') {
+            $this->SendDebug(__FUNCTION__, '🔐 Dock requested authentication (auth_required).', 0);
+
+            if ($this->EnsureApiKey()) {
+                $token = $this->ReadAttributeString('api_key');
+                $this->SendToWebSocket([
+                    'type' => 'auth',
+                    'token' => $token
+                ]);
+            } else {
+                $this->SendDebug(__FUNCTION__, '⏸️ Cannot authenticate yet (Host/Token missing).', 0);
+            }
+            return '';
+        }
+
+        // Log authentication result (optional)
+        if (($payload['type'] ?? '') === 'authentication') {
+            $code = $payload['code'] ?? null;
+            $this->SendDebug(__FUNCTION__, '🔐 Authentication result code: ' . json_encode($code), 0);
+            return '';
+        }
+
+        // Dock sysinfo response comes as: {"type":"dock","msg":"get_sysinfo", ...}
+        if (($payload['type'] ?? '') === 'dock' && ($payload['msg'] ?? '') === 'get_sysinfo' && isset($payload['code']) && (int)$payload['code'] === 200) {
+            $this->SendDebug(__FUNCTION__, '🧾 Dock sysinfo received (dock/get_sysinfo): ' . json_encode($payload), 0);
+            $this->WriteAttributeString('sysinfo_raw', json_encode($payload));
+            $this->ForwardToChildren($payload);
+            if (isset($payload['req_id'])) {
+                $this->WriteAttributeString('sysinfo_last_req_id', (string)$payload['req_id']);
+            }
+            if (method_exists($this, 'ReloadForm')) {
+                $this->ReloadForm();
+            }
+            return '';
+        }
+
+        // Dock system info response (expected after get_sysinfo)
+        $type = (string)($payload['type'] ?? '');
+        if ($type === 'sysinfo' || $type === 'get_sysinfo' || $type === 'sys_info' || $type === 'system' || $type === 'system_info') {
+            $this->SendDebug(__FUNCTION__, '🧾 Sysinfo received: ' . json_encode($payload), 0);
+            $this->WriteAttributeString('sysinfo_raw', json_encode($payload));
+            $this->ForwardToChildren($payload);
+
+            if (isset($payload['req_id'])) {
+                $this->WriteAttributeString('sysinfo_last_req_id', (string)$payload['req_id']);
+            } elseif (isset($payload['reqId'])) {
+                $this->WriteAttributeString('sysinfo_last_req_id', (string)$payload['reqId']);
+            }
+
+            if (method_exists($this, 'ReloadForm')) {
+                $this->ReloadForm();
+            }
+            return '';
+        }
+
+        // Wrapped sysinfo
+        if (($payload['kind'] ?? '') === 'result' || ($payload['type'] ?? '') === 'result' || ($payload['type'] ?? '') === 'resp') {
+            $msgData = $payload['msg_data'] ?? $payload['data'] ?? null;
+            if (is_array($msgData) && (isset($msgData['model']) || isset($msgData['hostname']) || isset($msgData['firmware']) || isset($msgData['hw_rev']))) {
+                $this->SendDebug(__FUNCTION__, '🧾 Sysinfo (wrapped) received: ' . json_encode($payload), 0);
+                $this->WriteAttributeString('sysinfo_raw', json_encode($payload));
+                if (method_exists($this, 'ReloadForm')) {
+                    $this->ReloadForm();
+                }
+                return '';
+            }
+        }
+
+        // For now, only log other messages; can be extended later.
+        return '';
     }
 
-    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    public function MessageSink(int $TimeStamp, int $SenderID, int $Message, array $Data): void
     {
         //Never delete this line!
         parent::MessageSink($TimeStamp, $SenderID, $Message, $Data);
@@ -150,152 +846,12 @@ class Remote3DockManager extends IPSModule
         }
     }
 
-
-    // === REST API Command Methods ===
-
-    private function SendRestRequest(string $method, string $endpoint, array $params = []): array
-    {
-        if (!$this->EnsureApiKey()) {
-            $this->SendDebug(__FUNCTION__, '❌ Kein API-Key verfügbar.', 0);
-            return ['error' => 'API key missing or could not be created'];
-        }
-
-        $url = 'http://' . $this->ReadPropertyString('host') . '/api' . $endpoint;
-        $this->SendDebug(__FUNCTION__, "🔗 URL: $url", 0);
-
-        $ch = curl_init();
-
-        $headers = [
-            'Content-Type: application/json'
-        ];
-
-        $apiKey = $this->ReadAttributeString('api_key');
-        if ($apiKey != '') {
-            $headers[] = 'Authorization: Bearer ' . $apiKey;
-        }
-
-        $options = [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_CUSTOMREQUEST => strtoupper($method),
-            CURLOPT_TIMEOUT => 10
-        ];
-
-        if (in_array(strtoupper($method), ['POST', 'PUT']) && !empty($params)) {
-            $options[CURLOPT_POSTFIELDS] = json_encode($params);
-        }
-
-        curl_setopt_array($ch, $options);
-        $result = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        $this->SendDebug(__FUNCTION__, "📥 HTTP-Code: $httpCode", 0);
-        $this->SendDebug(__FUNCTION__, "📥 Response: $result", 0);
-
-        if ($error !== '') {
-            $this->SendDebug(__FUNCTION__, "❌ CURL Error: $error", 0);
-            return ['error' => $error];
-        }
-
-        return json_decode($result, true);
-    }
-
-    protected function CallGetVersion($data)
-    {
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /pub/version...', 0);
-        $response = $this->SendRestRequest('GET', '/pub/version');
-
-        if (!is_array($response)) {
-            $this->SendDebug(__FUNCTION__, '❌ Ungültige Antwortstruktur.', 0);
-            return json_encode(['success' => false, 'message' => 'Invalid response']);
-        }
-
-        $this->SendDebug(__FUNCTION__, '✅ Antwort erhalten: ' . json_encode($response), 0);
-        return json_encode(['success' => true, 'data' => $response]);
-    }
-
-    public function CallGetSystem()
-    {
-        // GET /api/system
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /system...', 0);
-    }
-
-    public function CallGetStatus()
-    {
-        // GET /api/pub/status
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /pub/status...', 0);
-    }
-
-    public function CallGetHealthCheck()
-    {
-        // GET /api/pub/health_check
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /pub/health_check...', 0);
-    }
-
-
-    public function CallGetNetworkConfig()
-    {
-        // GET /api/cfg/network
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /cfg/network...', 0);
-    }
-
-    public function CallGetDisplayConfig()
-    {
-        // GET /api/cfg/display
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /cfg/display...', 0);
-    }
-
-    public function CallGetSoundConfig()
-    {
-        // GET /api/cfg/sound
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /cfg/sound...', 0);
-    }
-
-    public function CallGetRemotes()
-    {
-        // GET /api/remotes
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /remotes...', 0);
-    }
-
-    public function CallGetEntities()
-    {
-        // GET /api/entities
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /entities...', 0);
-    }
-
-    public function CallGetActivities()
-    {
-        // GET /api/activities
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /activities...', 0);
-    }
-
-    public function CallGetIntg()
-    {
-        // GET /api/intg
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /intg...', 0);
-    }
-
-    public function CallGetDock()
-    {
-        // GET /api/dock
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /dock...', 0);
-    }
-
-    public function CallGetDockDiscovery()
-    {
-        // GET /api/dock/discovery
-        $this->SendDebug(__FUNCTION__, '⏳ Requesting /dock/discovery...', 0);
-    }
-
     /**
      * build configuration form
      *
      * @return string
      */
-    public function GetConfigurationForm()
+    public function GetConfigurationForm(): string
     {
         // return current form
         return json_encode(
@@ -311,15 +867,113 @@ class Remote3DockManager extends IPSModule
      *
      * @return array
      */
-    protected function FormHead()
+    protected function FormHead(): array
     {
-        $form = [
-            [
+        $host = $this->ReadPropertyString('host');
+        $wsHost = $this->ReadPropertyString('ws_host');
+        $manualSetup = ($host === '');
+
+        // Helper for read-only property display
+        $ro = function (string $name, string $caption) {
+            return [
                 'type' => 'ValidationTextBox',
-                'name' => 'web_config_pass',
-                'caption' => 'Web-Konfigurator Passwort'
-            ],
+                'name' => $name,
+                'caption' => $caption,
+                'enabled' => false
+            ];
+        };
+
+        $form = [];
+
+        // Select Remote 3 Core instance to pull API key from
+        $form[] = [
+            'type' => 'SelectInstance',
+            'name' => 'core_instance_id',
+            'caption' => 'Remote 3 Core instance',
+            'moduleID' => '{C810D534-2395-7C43-D0BE-6DEC069B2516}',
+            'onChange' => 'UCD_UpdateApiKeyFromCore($id, $core_instance_id);'
         ];
+
+        $form[] = [
+            'type' => 'Label',
+            'caption' => 'Select your Remote 3 Core instance to automatically reuse its API key.'
+        ];
+
+        // Manual setup: allow entering host + websocket host
+        if ($manualSetup) {
+            $form[] = [
+                'type' => 'ValidationTextBox',
+                'name' => 'host',
+                'caption' => 'Host (IP)',
+                'enabled' => true
+            ];
+
+            $form[] = [
+                'type' => 'ValidationTextBox',
+                'name' => 'ws_host',
+                'caption' => 'WebSocket host',
+                'enabled' => true
+            ];
+
+            $form[] = [
+                'type' => 'ValidationTextBox',
+                'name' => 'api_key_display',
+                'caption' => 'API key',
+                'value' => $this->ReadAttributeString('api_key'),
+                'enabled' => false
+            ];
+            $form[] = [
+                'type' => 'ValidationTextBox',
+                'name' => 'sysinfo_display',
+                'caption' => 'Last sysinfo (raw JSON)',
+                'value' => $this->ReadAttributeString('sysinfo_raw'),
+                'enabled' => false
+            ];
+        } else {
+            // Discovery setup: show all known properties read-only
+            $form[] = [
+                'type' => 'Label',
+                'caption' => 'System information (read-only)'
+            ];
+
+            $form[] = $ro('hostname', 'Hostname');
+            $form[] = $ro('host', 'Host (IP)');
+            $form[] = $ro('port', 'Port');
+            $form[] = $ro('https_port', 'HTTPS port');
+
+            $form[] = $ro('ws_host', 'WebSocket host');
+            $form[] = $ro('ws_port', 'WebSocket port');
+            $form[] = $ro('ws_path', 'WebSocket path');
+
+            $form[] = $ro('ws_https_host', 'WebSocket HTTPS host');
+            $form[] = $ro('ws_https_port', 'WebSocket HTTPS port');
+
+            // Dock does not use web_config_user; remove this field.
+
+            $form[] = [
+                'type' => 'ValidationTextBox',
+                'name' => 'api_key_display',
+                'caption' => 'API key',
+                'value' => $this->ReadAttributeString('api_key'),
+                'enabled' => false
+            ];
+            $form[] = [
+                'type' => 'ValidationTextBox',
+                'name' => 'sysinfo_display',
+                'caption' => 'Last sysinfo (raw JSON)',
+                'value' => $this->ReadAttributeString('sysinfo_raw'),
+                'enabled' => false
+            ];
+        }
+
+        // Password is always editable, but is now the Dock access token.
+        $form[] = [
+            'type' => 'ValidationTextBox',
+            'name' => 'web_config_pass',
+            'caption' => 'Dock access token (WebSocket)',
+            'enabled' => true
+        ];
+
         return $form;
     }
 
@@ -328,10 +982,30 @@ class Remote3DockManager extends IPSModule
      *
      * @return array
      */
-    protected function FormActions()
+    protected function FormActions(): array
     {
-        $form = [];
-        return $form;
+        return [
+            [
+                'type' => 'Button',
+                'caption' => 'Fetch API key from selected Remote 3 Core',
+                'onClick' => 'UCD_UpdateApiKeyFromCore($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Update WS client configuration',
+                'onClick' => 'UCD_UpdateWSClient($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Request Dock sysinfo (get_sysinfo)',
+                'onClick' => 'UCD_GetSysInfo($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Authenticate using entered Dock token',
+                'onClick' => 'UCD_Authenticate($id, IPS_GetProperty($id, "web_config_pass"));'
+            ]
+        ];
     }
 
     /**
@@ -339,7 +1013,7 @@ class Remote3DockManager extends IPSModule
      *
      * @return array
      */
-    protected function FormStatus()
+    protected function FormStatus(): array
     {
         $form = [
             [
@@ -353,7 +1027,7 @@ class Remote3DockManager extends IPSModule
             [
                 'code' => IS_INACTIVE,
                 'icon' => 'inactive',
-                'caption' => 'interface closed.']];
+                'caption' => 'Interface closed.']];
 
         return $form;
     }

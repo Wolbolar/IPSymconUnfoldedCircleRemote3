@@ -1,8 +1,29 @@
 {
     "translations": {
         "de": {
-            "Translation 1": "Übersetzung 1",
-            "Translation 2": "Übersetzung 2"
+          "Note: This instance was created manually. Please enter at least Host/IP and the Web Configurator password.": "Hinweis: Diese Instanz wurde manuell erstellt. Bitte mindestens Host/IP und das Web-Konfigurator Passwort eintragen.",
+          "Note: This instance was created via Discovery. Host/IP and system information are managed automatically.": "Hinweis: Diese Instanz wurde über die Discovery erstellt. Host/IP und Systeminfos werden automatisch verwaltet.",
+          "Web Configurator Password": "Web-Konfigurator Passwort",
+          "System Information": "Systeminformationen",
+          "Name": "Name",
+          "Hostname": "Hostname",
+          "Host": "Host",
+          "Remote ID": "Remote ID",
+          "Model": "Modell",
+          "Firmware Version": "Version",
+          "API Version": "API-Version",
+          "HTTPS Port": "HTTPS-Port",
+          "Authentication": "Authentifizierungsinformationen",
+          "Web Configurator User": "Web-Konfigurator Benutzer",
+          "API Key": "API-Key",
+          "API Key Name": "API-Key Name",
+          "Auth Mode": "Auth-Modus",
+          "Symcon UUID": "Symcon UUID",
+          "Reset API Key": "API-Key zurücksetzen",
+          "Creating instance.": "Instanz wird erstellt.",
+          "Remote 3 Core Manager created.": "Remote 3 Core Manager erstellt.",
+          "interface closed.": "Schnittstelle geschlossen.",
+          "Refresh all data": "Alle Daten aktualisieren"
         }
     }
 }

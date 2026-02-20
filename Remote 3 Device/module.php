@@ -2,9 +2,20 @@
 
 declare(strict_types=1);
 
-class Remote3Device extends IPSModule
+class Remote3Device extends IPSModuleStrict
 {
-    public function Create()
+    public function GetCompatibleParents(): string
+    {
+        // Require the Remote 3 Core Manager as parent
+        return json_encode([
+            'type' => 'require',
+            'moduleIDs' => [
+                '{C810D534-2395-7C43-D0BE-6DEC069B2516}'
+            ]
+        ]);
+    }
+
+    public function Create(): void
     {
         //Never delete this line!
         parent::Create();
@@ -26,7 +37,6 @@ class Remote3Device extends IPSModule
         $this->RegisterAttributeString('activities', '');
         $this->RegisterAttributeString('activity_mapping', '');
 
-        $this->RequireParent('{C810D534-2395-7C43-D0BE-6DEC069B2516}');
 
         $this->RegisterVariableProfiles();
         $this->UpdateActivityProfile();
@@ -73,7 +83,7 @@ class Remote3Device extends IPSModule
     /**
      * Dynamically update activity variable profile based on activities attribute.
      */
-    protected function UpdateActivityProfile()
+    protected function UpdateActivityProfile(): void
     {
         $profileName = 'UCR.ActivityProfile';
 
@@ -112,7 +122,7 @@ class Remote3Device extends IPSModule
     /**
      * Register custom variable profiles if not already existing.
      */
-    protected function RegisterVariableProfiles()
+    protected function RegisterVariableProfiles(): void
     {
         // CPU Percent Profile
         $profile = 'UCR.CpuPercent';
@@ -130,24 +140,28 @@ class Remote3Device extends IPSModule
         }
     }
 
-    public function Destroy()
+    public function Destroy(): void
     {
         //Never delete this line!
         parent::Destroy();
     }
 
-    public function ApplyChanges()
+    public function ApplyChanges(): void
     {
         //Never delete this line!
         parent::ApplyChanges();
 
         if (IPS_GetKernelRunlevel() == KR_READY) {
-            // check if variables are empty
-            $this->CheckVariables();
+            // Only query data once a parent connection is available
+            if ($this->HasActiveParent()) {
+                $this->CheckVariables();
+            } else {
+                $this->SendDebug(__FUNCTION__, '⚠️ Kein aktiver Parent verbunden – Initialisierung wird verschoben.', 0);
+            }
         }
     }
 
-    protected function CheckVariables()
+    protected function CheckVariables(): void
     {
         $needInit = false;
         $varsToCheck = [
@@ -185,16 +199,20 @@ class Remote3Device extends IPSModule
     }
 
 
-    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    public function MessageSink(int $TimeStamp, int $SenderID, int $Message, array $Data): void
     {
         //Never delete this line!
         parent::MessageSink($TimeStamp, $SenderID, $Message, $Data);
         if ($Message == IPS_KERNELMESSAGE && $Data[0] == KR_READY) {
-            $this->CheckVariables();
+            if ($this->HasActiveParent()) {
+                $this->CheckVariables();
+            } else {
+                $this->SendDebug(__FUNCTION__, '⚠️ Kernel READY, aber kein aktiver Parent – Initialisierung wird verschoben.', 0);
+            }
         }
     }
 
-    public function RequestAction($ident, $value)
+    public function RequestAction(string $ident, $value): void
     {
         $this->SendDebug(__FUNCTION__, "RequestAction gestartet für Ident: $ident, Wert: $value", 0);
 
@@ -211,7 +229,7 @@ class Remote3Device extends IPSModule
         }
     }
 
-    protected function TriggerActivity(string $activityId, string $state = 'on')
+    protected function TriggerActivity(string $activityId, string $state = 'on'): void
     {
         $this->SendDebug(__FUNCTION__, "🔁 Aktivität auslösen: $activityId (state: $state)", 0);
 
@@ -239,7 +257,7 @@ class Remote3Device extends IPSModule
      * @param string $lang Language (default: 'de')
      * @param string $state State to set ('on' or 'off', default: 'on')
      */
-    public function TriggerActivityByName(string $activityName, string $lang = 'de', string $state = 'on')
+    public function TriggerActivityByName(string $activityName, string $lang = 'de', string $state = 'on'): void
     {
         $this->SendDebug(__FUNCTION__, "🔁 Aktivität anhand Name auslösen: $activityName (Sprache: $lang, Zustand: $state)", 0);
 
@@ -262,7 +280,7 @@ class Remote3Device extends IPSModule
         $this->SendDebug(__FUNCTION__, "❌ Keine Aktivität mit dem Namen '$activityName' für Sprache '$lang' gefunden.", 0);
     }
 
-    public function RequestVersion()
+    public function RequestVersion(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetVersion an Splitter', 0);
 
@@ -270,7 +288,7 @@ class Remote3Device extends IPSModule
 
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
 
         $versionData = $result['data'];
@@ -289,7 +307,7 @@ class Remote3Device extends IPSModule
     }
 
 
-    public function RequestStatus()
+    public function RequestStatus(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetStatus an Splitter', 0);
 
@@ -297,7 +315,7 @@ class Remote3Device extends IPSModule
 
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
 
         $statusData = $result['data'];
@@ -320,7 +338,7 @@ class Remote3Device extends IPSModule
     }
 
 
-    public function RequestHealthCheck()
+    public function RequestHealthCheck(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetHealthCheck an Splitter', 0);
 
@@ -328,7 +346,7 @@ class Remote3Device extends IPSModule
 
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
 
         $health = $result['data'];
@@ -348,61 +366,70 @@ class Remote3Device extends IPSModule
     /**
      * Request available scopes from core and store in attribute
      */
-    public function RequestScopes()
+    public function RequestScopes(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetScopes an Splitter', 0);
         $result = $this->SendDataToRemoteCore('CallGetScopes');
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
         $this->SendDebug(__FUNCTION__, '📦 Antwortdaten: ' . json_encode($result['data']), 0);
         $this->WriteAttributeString('scopes', json_encode($result['data']));
+        if (method_exists($this, 'ReloadForm')) {
+            $this->ReloadForm();
+        }
         return $result['data'];
     }
 
     /**
      * Request registered external systems
      */
-    public function RequestExternalSystems()
+    public function RequestExternalSystems(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetExternalSystems an Splitter', 0);
         $result = $this->SendDataToRemoteCore('CallGetExternalSystems');
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
         $this->SendDebug(__FUNCTION__, '📦 Antwortdaten: ' . json_encode($result['data']), 0);
         $this->WriteAttributeString('external_systems', json_encode($result['data']));
+        if (method_exists($this, 'ReloadForm')) {
+            $this->ReloadForm();
+        }
         return $result['data'];
     }
 
     /**
      * Request System Infomation
      */
-    public function RequestSystemInformation()
+    public function RequestSystemInformation(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetSystemInformation an Splitter', 0);
         $result = $this->SendDataToRemoteCore('CallGetSystemInformation');
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
         $this->SendDebug(__FUNCTION__, '📦 Antwortdaten: ' . json_encode($result['data']), 0);
         $this->WriteAttributeString('system_information', json_encode($result['data']));
+        if (method_exists($this, 'ReloadForm')) {
+            $this->ReloadForm();
+        }
         return $result['data'];
     }
 
     /**
      * Request Battery State and update variables
      */
-    public function RequestBatteryState()
+    public function RequestBatteryState(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetBatteryState an Splitter', 0);
         $result = $this->SendDataToRemoteCore('CallGetBatteryState');
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
         $this->SendDebug(__FUNCTION__, '📦 Antwortdaten: ' . json_encode($result['data']), 0);
         $this->WriteAttributeString('battery_state', json_encode($result['data']));
@@ -416,22 +443,51 @@ class Remote3Device extends IPSModule
     /**
      * Request Activities
      */
-    public function RequestActivities()
+    public function RequestActivities(): array
     {
         $this->SendDebug(__FUNCTION__, '📡 Anfrage: CallGetActivities an Splitter', 0);
         $result = $this->SendDataToRemoteCore('CallGetActivities');
         if (!isset($result['success']) || !$result['success']) {
             $this->SendDebug(__FUNCTION__, '❌ Fehler bei API-Aufruf', 0);
-            return;
+            return [];
         }
         $this->SendDebug(__FUNCTION__, '📦 Antwortdaten: ' . json_encode($result['data']), 0);
         $this->WriteAttributeString('activities', json_encode($result['data']));
         // Update activity profile after activities are refreshed
         $this->UpdateActivityProfile();
+        if (method_exists($this, 'ReloadForm')) {
+            $this->ReloadForm();
+        }
         return $result['data'];
     }
 
-    protected function SendDataToRemoteCore(string $method, $params = [])
+    /**
+     * Refresh all data from the Remote 3 Core (same as clicking all single request buttons).
+     */
+    public function RefreshAll(): void
+    {
+        $this->SendDebug(__FUNCTION__, '🔄 Refresh all data requested', 0);
+
+        // Guard: Only refresh if parent is available
+        if (!$this->HasActiveParent()) {
+            $this->SendDebug(__FUNCTION__, '❌ Kein aktiver Parent – RefreshAll wird abgebrochen.', 0);
+            return;
+        }
+
+        // Execute in the same logical order as the buttons
+        $this->RequestVersion();
+        $this->RequestStatus();
+        $this->RequestHealthCheck();
+        $this->RequestScopes();
+        $this->RequestExternalSystems();
+        $this->RequestSystemInformation();
+        $this->RequestBatteryState();
+        $this->RequestActivities();
+
+        $this->SendDebug(__FUNCTION__, '✅ Refresh all data finished', 0);
+    }
+
+    protected function SendDataToRemoteCore(string $method, $params = []): array
     {
         // Special handling for CallSendEntityCommand to adjust payload per command
         if ($method === 'CallSendEntityCommand') {
@@ -449,6 +505,11 @@ class Remote3Device extends IPSModule
             }
             $params = $payload;
         }
+        // Guard: Only send if parent is available
+        if (!$this->HasActiveParent()) {
+            $this->SendDebug(__FUNCTION__, '❌ Kein Parent konfiguriert/aktiv – SendDataToParent wird übersprungen. (method=' . $method . ')', 0);
+            return ['success' => false, 'error' => 'No active parent'];
+        }
         $data = [
             'DataID' => '{AC2A1323-0258-76DC-5AA8-9B0C092820A5}',
             'Buffer' => [
@@ -458,7 +519,15 @@ class Remote3Device extends IPSModule
         ];
         $this->SendDebug(__FUNCTION__, json_encode($data), 0);
         $response = $this->SendDataToParent(json_encode($data));
+        if ($response === false || $response === '') {
+            $this->SendDebug(__FUNCTION__, '❌ Leere/ungültige Antwort vom Parent.', 0);
+            return ['success' => false, 'error' => 'Empty response from parent'];
+        }
         $result = json_decode($response, true);
+        if (!is_array($result)) {
+            $this->SendDebug(__FUNCTION__, '❌ Parent-Antwort ist kein JSON-Array: ' . (string)$response, 0);
+            return ['success' => false, 'error' => 'Invalid JSON from parent'];
+        }
         return $result;
     }
 
@@ -517,23 +586,45 @@ class Remote3Device extends IPSModule
     }
 
 
-    public function ReceiveData($JSONString)
+    public function ReceiveData(string $JSONString): string
     {
-        $this->SendDebug(__FUNCTION__, $JSONString, 0);
-        $data = json_decode($JSONString, true);
-        if (!isset($data['Buffer']['msg']) || !isset($data['Buffer']['kind'])) {
-            return;
+        // Symcon passes an envelope JSON string, usually containing DataID + Buffer.
+        $this->SendDebug(__FUNCTION__, '📥 Envelope: ' . $this->Shorten($JSONString, 400), 0);
+
+        $envelope = json_decode($JSONString, true);
+        if (!is_array($envelope)) {
+            $this->SendDebug(__FUNCTION__, '⚠️ Envelope ist kein JSON (raw): ' . $this->Shorten($JSONString, 400), 0);
+            return '';
         }
 
-        if ($data['Buffer']['kind'] !== 'event') {
+        // Buffer can be:
+        // - a JSON string
+        // - a hex-encoded JSON string (common when forwarding from WebSocket)
+        // - already a decoded array
+        $buffer = $envelope['Buffer'] ?? null;
+        $payload = $this->DecodePayload($buffer);
+
+        if (!is_array($payload)) {
+            $this->SendDebug(__FUNCTION__, '⚠️ Payload konnte nicht dekodiert werden. BufferType=' . gettype($buffer), 0);
+            return '';
+        }
+
+        // Nice debug output
+        $kind = $payload['kind'] ?? '';
+        $msg = $payload['msg'] ?? '';
+        $this->SendDebug(__FUNCTION__, '📨 Payload: kind=' . (string)$kind . ' msg=' . (string)$msg, 0);
+        $this->SendDebug(__FUNCTION__, '📦 Payload JSON: ' . $this->Shorten(json_encode($payload), 600), 0);
+
+        // Only handle event messages
+        if (($payload['kind'] ?? '') !== 'event') {
             $this->SendDebug(__FUNCTION__, '🔕 Kein Event, wird ignoriert.', 0);
-            return;
+            return '';
         }
 
-        $msg = $data['Buffer']['msg'];
-        $msgData = $data['Buffer']['msg_data'] ?? [];
-
-        $this->SendDebug(__FUNCTION__, "📨 Event empfangen: $msg", 0);
+        $msgData = $payload['msg_data'] ?? [];
+        if (!is_array($msgData)) {
+            $msgData = [];
+        }
 
         switch ($msg) {
             case 'battery_status':
@@ -546,14 +637,82 @@ class Remote3Device extends IPSModule
 
             case 'power_mode_change':
                 $mode = $msgData['mode'] ?? '';
-                $this->SendDebug(__FUNCTION__, "💤 Power-Mode: $mode", 0);
-                $this->SetValue('OnlineStatus', in_array($mode, ['NORMAL', 'IDLE']));
+                $this->SendDebug(__FUNCTION__, '💤 Power-Mode: ' . (string)$mode, 0);
+                $this->SetValue('OnlineStatus', in_array($mode, ['NORMAL', 'IDLE'], true));
+                break;
+
+            case 'entity_change':
+                // We currently just log entity changes (e.g. Media Player updates)
+                $entityId = $msgData['entity_id'] ?? '';
+                $entityType = $msgData['entity_type'] ?? '';
+                $eventType = $msgData['event_type'] ?? '';
+                $this->SendDebug(__FUNCTION__, '🎛️ Entity change: ' . (string)$entityType . ' / ' . (string)$eventType . ' / ' . (string)$entityId, 0);
                 break;
 
             default:
-                $this->SendDebug(__FUNCTION__, "⚠️ Unbekannter Event-Typ: $msg", 0);
+                $this->SendDebug(__FUNCTION__, '⚠️ Unbekannter Event-Typ: ' . (string)$msg, 0);
                 break;
         }
+
+        // IPSModuleStrict expects a string return.
+        return '';
+    }
+
+    /**
+     * Decode the forwarded payload.
+     * Buffer can be array, JSON string, or hex string containing JSON.
+     *
+     * @param mixed $buffer
+     * @return array|null
+     */
+    private function DecodePayload($buffer): ?array
+    {
+        if (is_array($buffer)) {
+            return $buffer;
+        }
+
+        if (!is_string($buffer) || $buffer === '') {
+            return null;
+        }
+
+        // If buffer already looks like JSON
+        $trim = ltrim($buffer);
+        if ($trim !== '' && ($trim[0] === '{' || $trim[0] === '[')) {
+            $decoded = json_decode($buffer, true);
+            return is_array($decoded) ? $decoded : null;
+        }
+
+        // If buffer is hex-encoded JSON
+        if (ctype_xdigit($buffer) && (strlen($buffer) % 2 === 0)) {
+            $raw = @hex2bin($buffer);
+            if ($raw !== false) {
+                $decoded = json_decode($raw, true);
+                if (is_array($decoded)) {
+                    $this->SendDebug(__FUNCTION__, '✅ Hex-Payload dekodiert', 0);
+                    return $decoded;
+                }
+                // Sometimes the hex payload is an envelope again
+                $decodedEnvelope = json_decode($raw, true);
+                if (is_array($decodedEnvelope) && isset($decodedEnvelope['Buffer'])) {
+                    return $this->DecodePayload($decodedEnvelope['Buffer']);
+                }
+                $this->SendDebug(__FUNCTION__, '⚠️ Hex-Payload ist kein JSON: ' . $this->Shorten($raw, 200), 0);
+            }
+        }
+
+        // Unknown format
+        return null;
+    }
+
+    /**
+     * Helper to keep debug readable.
+     */
+    private function Shorten(string $text, int $maxLen = 250): string
+    {
+        if (strlen($text) <= $maxLen) {
+            return $text;
+        }
+        return substr($text, 0, $maxLen) . '…';
     }
 
     /**
@@ -579,7 +738,7 @@ class Remote3Device extends IPSModule
      *
      * @return string
      */
-    public function GetConfigurationForm()
+    public function GetConfigurationForm(): string
     {
         // return current form
         return json_encode(
@@ -595,7 +754,7 @@ class Remote3Device extends IPSModule
      *
      * @return array
      */
-    protected function FormHead()
+    protected function FormHead(): array
     {
         $scopes = json_decode($this->ReadAttributeString('scopes'), true);
         $external = json_decode($this->ReadAttributeString('external_systems'), true);
@@ -612,7 +771,7 @@ class Remote3Device extends IPSModule
                     'description' => $activity['description']['de'] ?? '',
                     'entity_id' => $activity['entity_id'] ?? '',
                     'state' => $activity['attributes']['state'] ?? '',
-                    'enabled' => isset($activity['enabled']) ? ($activity['enabled'] ? 'Ja' : 'Nein') : ''
+                    'enabled' => isset($activity['enabled']) ? ($activity['enabled'] ? 'Yes' : 'No') : ''
                 ];
             }
         }
@@ -624,21 +783,21 @@ class Remote3Device extends IPSModule
             ],
             [
                 'type' => 'ExpansionPanel',
-                'caption' => 'Aktivitäten',
+                'caption' => 'Activities',
                 'items' => [
                     [
                         'type' => 'List',
-                        'caption' => 'Verfügbare Aktivitäten',
+                        'caption' => 'Available activities',
                         'name' => 'Activities',
                         'rowCount' => 10,
                         'add' => false,
                         'delete' => false,
                         'columns' => [
                             ['caption' => 'Name', 'name' => 'name', 'width' => '250px'],
-                            ['caption' => 'Beschreibung', 'name' => 'description', 'width' => 'auto'],
+                            ['caption' => 'Description', 'name' => 'description', 'width' => 'auto'],
                             ['caption' => 'ID', 'name' => 'entity_id', 'width' => '450px'],
-                            ['caption' => 'Status', 'name' => 'state', 'width' => '80px'],
-                            ['caption' => 'Aktiviert', 'name' => 'enabled', 'width' => '80px']
+                            ['caption' => 'State', 'name' => 'state', 'width' => '80px'],
+                            ['caption' => 'Enabled', 'name' => 'enabled', 'width' => '80px']
                         ],
                         'values' => $activities
                     ]
@@ -646,39 +805,39 @@ class Remote3Device extends IPSModule
             ],
             [
                 'type' => 'ExpansionPanel',
-                'caption' => 'Systeminformationen',
+                'caption' => 'System information',
                 'items' => [
                     [
                         'type' => 'ValidationTextBox',
-                        'caption' => 'Modellname',
+                        'caption' => 'Model name',
                         'name' => 'model_name',
                         'value' => $system['model_name'] ?? '',
                         'enabled' => false
                     ],
                     [
                         'type' => 'ValidationTextBox',
-                        'caption' => 'Modellnummer',
+                        'caption' => 'Model number',
                         'name' => 'model_number',
                         'value' => $system['model_number'] ?? '',
                         'enabled' => false
                     ],
                     [
                         'type' => 'ValidationTextBox',
-                        'caption' => 'Seriennummer',
+                        'caption' => 'Serial number',
                         'name' => 'serial_number',
                         'value' => $system['serial_number'] ?? '',
                         'enabled' => false
                     ],
                     [
                         'type' => 'ValidationTextBox',
-                        'caption' => 'Hardware Revision',
+                        'caption' => 'Hardware revision',
                         'name' => 'hw_revision',
                         'value' => $system['hw_revision'] ?? '',
                         'enabled' => false
                     ],
                     [
                         'type' => 'ValidationTextBox',
-                        'caption' => 'Herstellungsdatum',
+                        'caption' => 'Manufacturing date',
                         'name' => 'manufacturing_date',
                         'value' => $system['manufacturing_date'] ?? '',
                         'enabled' => false
@@ -687,18 +846,18 @@ class Remote3Device extends IPSModule
             ],
             [
                 'type' => 'ExpansionPanel',
-                'caption' => 'Verfügbare Scopes',
+                'caption' => 'Available scopes',
                 'items' => [
                     [
                         'type' => 'List',
-                        'caption' => 'Verfügbare Scopes',
+                        'caption' => 'Available scopes',
                         'name' => 'AvailableScopes',
                         'rowCount' => 10,
                         'add' => false,
                         'delete' => false,
                         'columns' => [
                             ['caption' => 'Name', 'name' => 'name', 'width' => '200px'],
-                            ['caption' => 'Beschreibung', 'name' => 'description', 'width' => 'auto']
+                            ['caption' => 'Description', 'name' => 'description', 'width' => 'auto']
                         ],
                         'values' => is_array($scopes) ? $scopes : []
                     ]
@@ -706,11 +865,11 @@ class Remote3Device extends IPSModule
             ],
             [
                 'type' => 'ExpansionPanel',
-                'caption' => 'Registrierte externe Systeme',
+                'caption' => 'Registered external systems',
                 'items' => [
                     [
                         'type' => 'List',
-                        'caption' => 'Registrierte externe Systeme',
+                        'caption' => 'Registered external systems',
                         'name' => 'ExternalSystems',
                         'rowCount' => 10,
                         'add' => false,
@@ -731,47 +890,52 @@ class Remote3Device extends IPSModule
      *
      * @return array
      */
-    protected function FormActions()
+    protected function FormActions(): array
     {
         return [
             [
                 'type' => 'Button',
-                'caption' => 'Version abfragen',
+                'caption' => 'Refresh all data',
+                'onClick' => 'UCR_RefreshAll($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Fetch version',
                 'onClick' => 'UCR_RequestVersion($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Status abfragen',
+                'caption' => 'Fetch status',
                 'onClick' => 'UCR_RequestStatus($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Systemprüfung abfragen',
+                'caption' => 'Fetch health check',
                 'onClick' => 'UCR_RequestHealthCheck($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Scopes abrufen',
+                'caption' => 'Fetch scopes',
                 'onClick' => 'UCR_RequestScopes($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Registrierte externe Systeme abrufen',
+                'caption' => 'Fetch registered external systems',
                 'onClick' => 'UCR_RequestExternalSystems($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'System Information abrufen',
+                'caption' => 'Fetch system information',
                 'onClick' => 'UCR_RequestSystemInformation($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Batterie Status abrufen',
+                'caption' => 'Fetch battery status',
                 'onClick' => 'UCR_RequestBatteryState($id);'
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Aktivitäten abrufen',
+                'caption' => 'Fetch activities',
                 'onClick' => 'UCR_RequestActivities($id);'
             ]
         ];
@@ -782,7 +946,7 @@ class Remote3Device extends IPSModule
      *
      * @return array
      */
-    protected function FormStatus()
+    protected function FormStatus(): array
     {
         $form = [
             [
@@ -796,7 +960,7 @@ class Remote3Device extends IPSModule
             [
                 'code' => IS_INACTIVE,
                 'icon' => 'inactive',
-                'caption' => 'interface closed.']];
+                'caption' => 'Interface closed.']];
 
         return $form;
     }

@@ -1,8 +1,34 @@
 {
     "translations": {
         "de": {
-            "Translation 1": "Übersetzung 1",
-            "Translation 2": "Übersetzung 2"
+          "Activities": "Aktivitäten",
+          "Available activities": "Verfügbare Aktivitäten",
+          "Description": "Beschreibung",
+          "State": "Status",
+          "Enabled": "Aktiviert",
+          "System information": "Systeminformationen",
+          "Model name": "Modellname",
+          "Model number": "Modellnummer",
+          "Serial number": "Seriennummer",
+          "Hardware revision": "Hardware Revision",
+          "Manufacturing date": "Herstellungsdatum",
+          "Available scopes": "Verfügbare Scopes",
+          "Registered external systems": "Registrierte externe Systeme",
+          "Refresh all data": "Alle Daten abrufen",
+          "Fetch version": "Version abfragen",
+          "Fetch status": "Status abfragen",
+          "Fetch health check": "Systemprüfung abfragen",
+          "Fetch scopes": "Scopes abrufen",
+          "Fetch registered external systems": "Registrierte externe Systeme abrufen",
+          "Fetch system information": "System Information abrufen",
+          "Fetch battery status": "Batterie Status abrufen",
+          "Fetch activities": "Aktivitäten abrufen",
+          "Interface closed.": "Schnittstelle geschlossen.",
+          "Yes": "Ja",
+          "No": "Nein",
+          "Creating instance.": "Instanz wird erstellt.",
+          "Remote 3 Device created.": "Remote 3 Gerät erstellt.",
+          "Interface closed.": "Schnittstelle geschlossen."
         }
     }
 }

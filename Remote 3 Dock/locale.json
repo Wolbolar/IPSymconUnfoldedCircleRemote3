@@ -1,8 +1,9 @@
 {
     "translations": {
         "de": {
-            "Translation 1": "Übersetzung 1",
-            "Translation 2": "Übersetzung 2"
+          "Creating instance.": "Instanz wird erstellt.",
+          "Remote 3 Dock created.": "Remote 3 Dock erstellt.",
+          "Interface closed.": "Schnittstelle geschlossen."
         }
     }
 }

@@ -1,8 +1,28 @@
 {
     "translations": {
         "de": {
-            "Translation 1": "Übersetzung 1",
-            "Translation 2": "Übersetzung 2"
+            "Web configuration password": "Web-Konfigurations-Passwort",
+            "Remote 3": "Remote 3",
+            "Remote 3 Dock": "Remote 3 Dock",
+            "ID": "ID",
+            "Name": "Name",
+            "Hostname": "Hostname",
+            "Host (IP)": "Host (IP)",
+            "Model": "Modell",
+            "API Version": "API-Version",
+            "Firmware": "Firmware",
+            "HTTPS Port": "HTTPS-Port",
+            "Status": "Status",
+            "Background Discovery of Remote 3": "Hintergrundsuche nach Remote 3",
+            "Hardware rev": "Hardware-Revision",
+            "WebSocket path": "WebSocket-Pfad",
+            "Clean up offline remotes": "Offline-Remotes bereinigen",
+            "Clean up offline docks": "Offline-Docks bereinigen",
+            "Creating instance.": "Instanz wird erstellt.",
+            "Remote 3 Discovery created.": "Remote 3 Discovery erstellt.",
+            "Interface closed.": "Schnittstelle geschlossen.",
+            "Please enter the Remote 3 web configuration password before creating instances.": "Bitte gebe das Remote 3 Web-Konfigurations-Passwort ein, bevor Instanzen erstellt werden.",
+            "Please check the Remote 3 web configuration password before creating instances and update it.": "Bitte prüfe das Remote 3 Web-Konfigurations-Passwort vor dem Erstellen von Instanzen und aktualisiere es bei Bedarf."
         }
     }
 }

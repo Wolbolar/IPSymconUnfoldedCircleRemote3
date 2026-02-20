@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-class Remote3Discovery extends IPSModule
+class Remote3Discovery extends IPSModuleStrict
 {
     const DEFAULT_WS_PROTOCOL = 'ws://';
     const DEFAULT_WS_PORT = 8080;
@@ -10,10 +10,13 @@ class Remote3Discovery extends IPSModule
     const DEFAULT_WSS_PORT = 8443;
     const DEFAULT_WS_PATH = '/ws';
 
-    public function Create()
+    public function Create(): void
     {
         //Never delete this line!
         parent::Create();
+
+        // Web Config password for Remote 3 (used when creating Core Manager instances)
+        $this->RegisterPropertyString('web_config_pass', '');
 
         $this->RegisterAttributeString('devices', '[]');
         $this->RegisterAttributeString('known_remotes', '[]');
@@ -28,13 +31,13 @@ class Remote3Discovery extends IPSModule
         $this->RegisterTimer('Discovery', 0, 'UCR_Discover($_IPS[\'TARGET\']);');
     }
 
-    public function Destroy()
+    public function Destroy(): void
     {
         //Never delete this line!
         parent::Destroy();
     }
 
-    public function ApplyChanges()
+    public function ApplyChanges(): void
     {
         //Never delete this line!
         parent::ApplyChanges();
@@ -50,7 +53,7 @@ class Remote3Discovery extends IPSModule
         $this->SetStatus(IS_ACTIVE);
     }
 
-    public function GetKnownRemotes()
+    public function GetKnownRemotes(): array
     {
         $knownRemotes = json_decode($this->ReadAttributeString('known_remotes'), true);
         return $knownRemotes;
@@ -120,6 +123,9 @@ class Remote3Discovery extends IPSModule
     public function SearchRemotes(): array
     {
         $mDNSInstanceID = $this->GetDNSSD();
+        if ($mDNSInstanceID === 0) {
+            return [];
+        }
         $remotes = ZC_QueryServiceType($mDNSInstanceID, '_uc-remote._tcp', 'local');
         return $remotes;
     }
@@ -127,19 +133,25 @@ class Remote3Discovery extends IPSModule
     public function SearchDocks(): array
     {
         $mDNSInstanceID = $this->GetDNSSD();
+        if ($mDNSInstanceID === 0) {
+            return [];
+        }
         $docks = ZC_QueryServiceType($mDNSInstanceID, '_uc-dock._tcp', 'local');
         return $docks;
     }
 
 
-    private function GetDNSSD()
+    private function GetDNSSD(): int
     {
         $mDNSInstanceIDs = IPS_GetInstanceListByModuleID('{780B2D48-916C-4D59-AD35-5A429B2355A5}');
+        if (empty($mDNSInstanceIDs)) {
+            return 0;
+        }
         $mDNSInstanceID = $mDNSInstanceIDs[0];
         return $mDNSInstanceID;
     }
 
-    protected function GetRemoteInfo($devices): array
+    protected function GetRemoteInfo(array $devices): array
     {
         $mDNSInstanceID = $this->GetDNSSD();
         $remote_info = [];
@@ -224,7 +236,7 @@ class Remote3Discovery extends IPSModule
         return $remote_info;
     }
 
-    protected function GetDockInfo($devices): array
+    protected function GetDockInfo(array $devices): array
     {
         $mDNSInstanceID = $this->GetDNSSD();
         $dock_info = [];
@@ -300,7 +312,7 @@ class Remote3Discovery extends IPSModule
         return $dock_info;
     }
 
-    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    public function MessageSink(int $TimeStamp, int $SenderID, int $Message, array $Data): void
     {
         switch ($Message) {
             case IM_CHANGESTATUS:
@@ -323,21 +335,17 @@ class Remote3Discovery extends IPSModule
         }
     }
 
-    public function GetDevices()
+    public function GetDevices(): string
     {
-        $devices = $this->ReadPropertyString('devices');
-
-        return $devices;
+        return $this->ReadAttributeString('devices');
     }
 
-    public function GetDocks()
+    public function GetDocks(): string
     {
-        $docks = $this->ReadPropertyString('docks');
-
-        return $docks;
+        return $this->ReadAttributeString('docks');
     }
 
-    public function Discover()
+    public function Discover(): array
     {
         if (empty($this->DiscoverDevices())) {
             $devices = '';
@@ -471,7 +479,7 @@ class Remote3Discovery extends IPSModule
      *
      * @return string
      */
-    public function GetConfigurationForm()
+    public function GetConfigurationForm(): string
     {
         // return current form
         $form = json_encode(
@@ -491,13 +499,35 @@ class Remote3Discovery extends IPSModule
      *
      * @return array
      */
-    protected function FormHead()
+    protected function FormHead(): array
     {
-        $form = [
+        $pass = $this->ReadPropertyString('web_config_pass');
+        $isEmpty = trim($pass) === '';
+
+        $hintText = $isEmpty
+            ? 'Please enter the Remote 3 web configuration password before creating instances.'
+            : 'Please check the Remote 3 web configuration password before creating instances and update it.';
+
+        // `color` in Symcon config forms expects an integer (0xRRGGBB)
+        $hintColor = $isEmpty ? 0xC00000 : 0x000000;
+
+        return [
             [
                 'type' => 'Label',
-                'caption' => 'Remote 3']];
-        return $form;
+                'caption' => 'Remote 3'
+            ],
+            [
+                'type' => 'Label',
+                'caption' => $hintText,
+                'italic' => true,
+                'color' => $hintColor
+            ],
+            [
+                'type' => 'ValidationTextBox',
+                'name' => 'web_config_pass',
+                'caption' => 'Web configuration password'
+            ]
+        ];
     }
 
     /**
@@ -505,7 +535,7 @@ class Remote3Discovery extends IPSModule
      *
      * @return array
      */
-    protected function FormActions()
+    protected function FormActions(): array
     {
         $form = [
             [
@@ -538,7 +568,7 @@ class Remote3Discovery extends IPSModule
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Offline-Remotes bereinigen',
+                'caption' => 'Clean up offline remotes',
                 'onClick' => 'UCR_CleanupOfflineRemotes($id);'
             ],
             [
@@ -559,15 +589,15 @@ class Remote3Discovery extends IPSModule
                     ['caption' => 'Host (IP)', 'name' => 'host', 'width' => '200px'],
                     ['caption' => 'Model', 'name' => 'model', 'width' => '120px'],
                     ['caption' => 'Firmware', 'name' => 'version', 'width' => '120px'],
-                    ['caption' => 'Hardware-Rev', 'name' => 'rev', 'width' => '120px'],
-                    ['caption' => 'WebSocket Pfad', 'name' => 'ws_path', 'width' => '150px'],
+                    ['caption' => 'Hardware rev', 'name' => 'rev', 'width' => '120px'],
+                    ['caption' => 'WebSocket path', 'name' => 'ws_path', 'width' => '150px'],
                     ['caption' => 'Status', 'name' => 'status', 'width' => '100px']
                 ],
                 'values' => $this->Get_ListConfigurationDocks(),
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Offline-Docks bereinigen',
+                'caption' => 'Clean up offline docks',
                 'onClick' => 'UCR_CleanupOfflineDocks($id);'
             ]
         ];
@@ -579,7 +609,7 @@ class Remote3Discovery extends IPSModule
      *
      * @return array configlist all devices
      */
-    private function Get_ListConfigurationRemotes()
+    private function Get_ListConfigurationRemotes(): array
     {
         $config_list = [];
         $RemoteIDList = IPS_GetInstanceListByModuleID('{5894A8B3-7E60-981A-B3BA-6647335B57E4}'); // Remote 3 Device
@@ -654,7 +684,8 @@ class Remote3Discovery extends IPSModule
                                 'model' => $device['model'],
                                 'ver_api' => $device['ver_api'],
                                 'version' => $device['version'],
-                                'https_port' => $device['https_port']
+                                'https_port' => $device['https_port'],
+                                'web_config_pass' => $this->ReadPropertyString('web_config_pass')
                             ]
                         ],
                         [
@@ -673,10 +704,10 @@ class Remote3Discovery extends IPSModule
         return $config_list;
     }
 
-    private function Get_ListConfigurationDocks()
+    private function Get_ListConfigurationDocks(): array
     {
         $config_list = [];
-        $DockIDList = IPS_GetInstanceListByModuleID('{E502C0F2-7482-0B16-9C15-77C04C6399B3}'); // Remote 3 Device
+        $DockIDList = IPS_GetInstanceListByModuleID('{E502C0F2-7482-0B16-9C15-77C04C6399B3}'); // Remote 3 Dock
         $docks = json_decode($this->ReadAttributeString('known_docks'), true);
         // Doppelte IP-Adressen filtern (nur erster Eintrag bleibt)
         $filteredByIP = [];
@@ -724,7 +755,9 @@ class Remote3Discovery extends IPSModule
                     'status' => $dock['status'] ?? '',
                     'create' => [
                         [
+                            // Dock Device (Device)
                             'moduleID' => '{E502C0F2-7482-0B16-9C15-77C04C6399B3}',
+                            'name' => $name,
                             'configuration' => [
                                 'name' => $name,
                                 'hostname' => $hostname,
@@ -734,6 +767,30 @@ class Remote3Discovery extends IPSModule
                                 'version' => $dock['version'],
                                 'rev' => $dock['rev'],
                                 'ws_path' => $dock['ws_path']
+                            ]
+                        ],
+                        [
+                            // Dock Manager (Splitter)
+                            'moduleID' => '{9CD1AA03-841E-FB97-8E32-6536A1D4561B}',
+                            'name' => 'Remote 3 Dock Manager ' . $name,
+                            'configuration' => [
+                                'hostname' => $hostname,
+                                'host' => $host,
+                                'port' => (string)($dock['port'] ?? ''),
+                                'ws_path' => (string)($dock['ws_path'] ?? ''),
+                                'ws_port' => (string)($dock['port'] ?? ''),
+                                'ws_host' => (string)$host,
+                                'web_config_pass' => $this->ReadPropertyString('web_config_pass')
+                            ]
+                        ],
+                        [
+                            // WebSocket Client (I/O)
+                            'moduleID' => '{D68FD31F-0E90-7019-F16C-1949BD3079EF}',
+                            'name' => 'Dock 3 ' . $name . ' (WS)',
+                            'configuration' => [
+                                'URL' => self::DEFAULT_WS_PROTOCOL . $host . ':' . ($dock['port'] ?? self::DEFAULT_WS_PORT) . (($dock['ws_path'] ?? '') !== '' ? $dock['ws_path'] : self::DEFAULT_WS_PATH),
+                                'VerifyCertificate' => false,
+                                'Type' => 0 // Text
                             ]
                         ]
                     ]
@@ -748,7 +805,7 @@ class Remote3Discovery extends IPSModule
      *
      * @return array
      */
-    protected function FormStatus()
+    protected function FormStatus(): array
     {
         $form = [
             [
@@ -758,11 +815,11 @@ class Remote3Discovery extends IPSModule
             [
                 'code' => IS_ACTIVE,
                 'icon' => 'active',
-                'caption' => 'Remote 3 Core Manager created.'],
+                'caption' => 'Remote 3 Discovery created.'],
             [
                 'code' => IS_INACTIVE,
                 'icon' => 'inactive',
-                'caption' => 'interface closed.']];
+                'caption' => 'Interface closed.']];
 
         return $form;
     }

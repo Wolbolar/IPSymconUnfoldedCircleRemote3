@@ -17,7 +17,7 @@ include_once __DIR__ . '/../libs/ClientSessionManagement.php';
 
 use WebsocketHandler\WebSocketUtils;
 
-class Remote3IntegrationDriver extends IPSModule
+class Remote3IntegrationDriver extends IPSModuleStrict
 {
     use ClientSessionTrait;
 
@@ -31,7 +31,15 @@ class Remote3IntegrationDriver extends IPSModule
 
     const Unfolded_Circle_API_Minimum_Version = "0.12.1";
 
-    public function Create()
+    public function GetCompatibleParents(): string
+    {
+        return json_encode([
+            'type' => 'require',
+            'moduleIDs' => ['{8062CF2B-600E-41D6-AD4B-1BA66C32D6ED}']
+        ]);
+    }
+
+    public function Create(): void
     {
         //Never delete this line!
         parent::Create();
@@ -65,14 +73,14 @@ class Remote3IntegrationDriver extends IPSModule
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
 
-        $this->RequireParent('{8062CF2B-600E-41D6-AD4B-1BA66C32D6ED}');
+        // $this->RequireParent('{8062CF2B-600E-41D6-AD4B-1BA66C32D6ED}');
         $this->RegisterTimer("PingDeviceState", 0, 'UCR_PingDeviceState($_IPS[\'TARGET\']);');
 
         $this->RegisterTimer('UpdateAllEntityStates', 0, 'UCR_UpdateAllEntityStates($_IPS["TARGET"]);');
 
     }
 
-    public function Destroy()
+    public function Destroy(): void
     {
         //Never delete this line!
         parent::Destroy();
@@ -80,11 +88,11 @@ class Remote3IntegrationDriver extends IPSModule
         $this->UnregisterMdnsService();
     }
 
-    public function ApplyChanges()
+    public function ApplyChanges(): void
     {
         //Never delete this line!
         parent::ApplyChanges();
-        $this->SendDebug(__FUNCTION__, '⚙️ ApplyChanges() aufgerufen', 0);
+        $this->SendDebugExtended(__FUNCTION__, '⚙️ ApplyChanges() aufgerufen', 0);
         //Only call this in READY state. On startup the WebHook instance might not be available yet
         if (IPS_GetKernelRunlevel() == KR_READY) {
             $this->RegisterHook('/hook/unfoldedcircle');
@@ -103,7 +111,7 @@ class Remote3IntegrationDriver extends IPSModule
         }
     }
 
-    public function GetConfigurationForParent()
+    public function GetConfigurationForParent(): string
     {
 
         $Config = [
@@ -119,7 +127,7 @@ class Remote3IntegrationDriver extends IPSModule
 
     public function PingDeviceState(): void
     {
-        $this->SendDebug(__FUNCTION__, '🔄 Timer-Methode wurde aufgerufen', 0);
+        $this->SendDebugExtended(__FUNCTION__, '🔄 Timer-Methode wurde aufgerufen', 0);
         $sessions = $this->getAllClientSessions();
         $whitelist = array_map('trim', array_column(json_decode($this->ReadPropertyString('ip_whitelist'), true), 'ip'));
 
@@ -129,35 +137,35 @@ class Remote3IntegrationDriver extends IPSModule
             $hasPort = !empty($entry['port']);
 
             if (($isAuthenticated || $isWhitelisted) && $hasPort) {
-                $this->SendDebug(__FUNCTION__, "🔁 Status-Ping an $ip:{$entry['port']} (auth: " . ($isAuthenticated ? '✅' : '❌') . ", whitelist: " . ($isWhitelisted ? '✅' : '❌') . ")", 0);
+                $this->SendDebugExtended(__FUNCTION__, "🔁 Status-Ping an $ip:{$entry['port']} (auth: " . ($isAuthenticated ? '✅' : '❌') . ", whitelist: " . ($isWhitelisted ? '✅' : '❌') . ")", 0);
                 $this->SendDeviceState('CONNECTED', $ip, (int)$entry['port']);
             } else {
-                $this->SendDebug(__FUNCTION__, "⏭️ Ping übersprungen für $ip (auth: " . ($isAuthenticated ? '✅' : '❌') . ", whitelist: " . ($isWhitelisted ? '✅' : '❌') . ", port: " . ($entry['port'] ?? '—') . ")", 0);
+                $this->SendDebugExtended(__FUNCTION__, "⏭️ Ping übersprungen für $ip (auth: " . ($isAuthenticated ? '✅' : '❌') . ", whitelist: " . ($isWhitelisted ? '✅' : '❌') . ", port: " . ($entry['port'] ?? '—') . ")", 0);
             }
         }
     }
 
-    public function GetClientSessions()
+    public function GetClientSessions(): string
     {
         // $this->WriteAttributeString('client_sessions', "");
         return $this->ReadAttributeString('client_sessions');
     }
 
-    public function GetLoggedEventTypes()
+    public function GetLoggedEventTypes(): string
     {
         // $this->WriteAttributeString('events', "");
         return $this->ReadAttributeString('events');
     }
 
-    public function GetLoggedCommands()
+    public function GetLoggedCommands(): string
     {
         // $this->WriteAttributeString('events', "");
         return $this->ReadAttributeString('log_commands');
     }
 
-    public function UpdateAllEntityStates()
+    public function UpdateAllEntityStates(): void
     {
-        $this->SendDebug(__FUNCTION__, '🔄 Starte zyklisches Update aller Entitätszustände...', 0);
+        $this->SendDebugExtended(__FUNCTION__, '🔄 Starte zyklisches Update aller Entitätszustände...', 0);
 
         $types = [
             'button' => 'button_mapping',
@@ -174,7 +182,7 @@ class Remote3IntegrationDriver extends IPSModule
         foreach ($types as $type => $property) {
             $mapping = json_decode($this->ReadPropertyString($property), true);
             if (!is_array($mapping) || count($mapping) === 0) {
-                $this->SendDebug(__FUNCTION__, "ℹ️ Keine Einträge für Typ '$type' vorhanden.", 0);
+                $this->SendDebugExtended(__FUNCTION__, "ℹ️ Keine Einträge für Typ '$type' vorhanden.", 0);
                 continue;
             }
 
@@ -252,7 +260,7 @@ class Remote3IntegrationDriver extends IPSModule
                                 $attributes['current_temperature'] = @GetValue($entry['current_temp_var_id']);
                             }
 
-                            $this->SendDebug(__FUNCTION__, '📤 Sende Entity für Climate: ' . json_encode($attributes), 0);
+                            $this->SendDebugExtended(__FUNCTION__, '📤 Sende Entity für Climate: ' . json_encode($attributes), 0);
                             $this->SendEntityChange('climate_' . $entry['instance_id'], 'climate', $attributes);
                         }
                         break;
@@ -305,19 +313,19 @@ class Remote3IntegrationDriver extends IPSModule
 
                     case 'media':
                         if (!isset($entry['features']) || !is_array($entry['features'])) {
-                            $this->SendDebug(__FUNCTION__, "⚠️ Kein gültiges Feature-Array für Media-Player-Instanz: " . json_encode($entry), 0);
+                            $this->SendDebugExtended(__FUNCTION__, "⚠️ Kein gültiges Feature-Array für Media-Player-Instanz: " . json_encode($entry), 0);
                             continue 2;
                         }
 
                         $attributes = [];
                         $instanceId = $entry['instance_id'] ?? 0;
                         if ($instanceId === 0) {
-                            $this->SendDebug(__FUNCTION__, "⚠️ Kein instance_id gesetzt für Media-Entry: " . json_encode($entry), 0);
+                            $this->SendDebugExtended(__FUNCTION__, "⚠️ Kein instance_id gesetzt für Media-Entry: " . json_encode($entry), 0);
                             continue 2;
                         }
 
                         $entityId = 'media_player_' . $instanceId;
-                        $this->SendDebug(__FUNCTION__, "🎵 Verarbeite Media Player: $entityId", 0);
+                        $this->SendDebugExtended(__FUNCTION__, "🎵 Verarbeite Media Player: $entityId", 0);
 
                         $stateSet = false;
 
@@ -365,7 +373,7 @@ class Remote3IntegrationDriver extends IPSModule
 
                         if (!$stateSet) {
                             $attributes['state'] = 'ON'; // Fallback
-                            $this->SendDebug(__FUNCTION__, "ℹ️ Kein Status-Feature vorhanden, setze 'state' auf ON", 0);
+                            $this->SendDebugExtended(__FUNCTION__, "ℹ️ Kein Status-Feature vorhanden, setze 'state' auf ON", 0);
                         }
 
                         // $this->SendDebug(__FUNCTION__, "📤 Sende Entity für Media Player $entityId: " . json_encode($attributes), 0);
@@ -384,7 +392,7 @@ class Remote3IntegrationDriver extends IPSModule
                         break;
 
                     default:
-                        $this->SendDebug(__FUNCTION__, "⚠️ Unbekannter Entitätstyp: $type", 0);
+                        $this->SendDebugExtended(__FUNCTION__, "⚠️ Unbekannter Entitätstyp: $type", 0);
                         continue 2;
                 }
             }
@@ -424,12 +432,12 @@ class Remote3IntegrationDriver extends IPSModule
         return ['value' => $value, 'unit' => $unit];
     }
 
-    private function Send(string $Text)
+    private function Send(string $Text): void
     {
         $this->SendDataToChildren(json_encode(['DataID' => '{34A21C2C-646B-1014-D032-DF7E7A88B419}', 'Buffer' => $Text]));
     }
 
-    public function ForwardData($JSONString)
+    public function ForwardData(string $JSONString): string
     {
         $this->SendDebug(__FUNCTION__, '📥 Eingehende Daten: ' . $JSONString, 0);
 
@@ -457,40 +465,92 @@ class Remote3IntegrationDriver extends IPSModule
                 return $this->CallGetVersion();
             default:
                 $this->SendDebug(__FUNCTION__, "⚠️ Unbekannte Methode: $method", 0);
-                return json_encode(['error' => 'Unbekannte Methode']);
+                return json_encode(['error' => 'Unbekannter Fehler']);
         }
     }
 
-    private function SendDataWebsocket($payload, string $ClientIP, int $ClientPort)
+    private function SendDataWebsocket($payload, string $ClientIP, int $ClientPort): void
     {
+        // IPSModuleStrict: Binary data may be transported as HEX strings between instances.
+        // Server Socket supports this and will send the decoded bytes on the wire.
+        // We therefore ensure the JSON we send to the parent is always valid UTF-8.
+
+        if (!is_string($payload)) {
+            $payload = (string)$payload;
+        }
+
+        // If payload contains non-UTF8 bytes (typical for WebSocket frames), encode as HEX.
+        // This mirrors what we already do in ReceiveData() for incoming buffers.
+        $sendBuffer = $payload;
+        $isHex = false;
+
+        // Fast path: ASCII / UTF-8 text (handshake HTTP headers etc.)
+        if ($sendBuffer !== '' && !mb_check_encoding($sendBuffer, 'UTF-8')) {
+            $sendBuffer = bin2hex($sendBuffer);
+            $isHex = true;
+        }
+
+        // $this->SendDebugExtended(__FUNCTION__, sprintf('📤 SendDataWebsocket → %s buffer to %s:%d (len=%d)', $isHex ? 'HEX' : 'TEXT', $ClientIP, $ClientPort, strlen($sendBuffer)), 0);
+        $this->SendDebug(__FUNCTION__, sprintf('📤 SendDataWebsocket → %s buffer to %s:%d (len=%d)', $isHex ? 'HEX' : 'TEXT', $ClientIP, $ClientPort, strlen($sendBuffer)), 0);
+
+
         $this->SendDataToParent(json_encode([
             'DataID' => '{C8792760-65CF-4C53-B5C7-A30FCC84FEFE}',
-            "ClientIP" => $ClientIP,
-            "ClientPort" => $ClientPort,
-            "Type" => 0,
-            "Buffer" => $payload]));
+            'ClientIP' => $ClientIP,
+            'ClientPort' => $ClientPort,
+            'Type' => self::Socket_Data,
+            'Buffer' => $sendBuffer,
+            // Hint for our own debugging; harmless for the parent.
+            'BufferIsHex' => $isHex
+        ]));
     }
 
-    public function ReceiveData($JSONString)
+    public function ReceiveData(string $JSONString): string
     {
+        // Always show at least a small trace that something arrived
+        $this->SendDebug(__FUNCTION__, '📥 Incoming (raw length): ' . strlen($JSONString), 0);
         $this->SendDebugExtended(__FUNCTION__, '📥 Raw Data: ' . $JSONString, 0);
 
         $data = json_decode($JSONString, true);
         if (!is_array($data)) {
-            $this->SendDebugExtended(__FUNCTION__, '❌ JSON-Parsing fehlgeschlagen: ' . json_last_error_msg(), 0);
-            $this->SendDebugExtended(__FUNCTION__, '📥 Ursprünglicher JSON-String: ' . $JSONString, 0);
-            return;
+            $this->SendDebug(__FUNCTION__, '❌ JSON decode failed: ' . json_last_error_msg(), 0);
+            $this->SendDebugExtended(__FUNCTION__, '📥 Original JSON string: ' . $JSONString, 0);
+            return '';
         }
-        $this->SendDebugExtended(__FUNCTION__, '✅ JSON erfolgreich dekodiert', 0);
 
-        if (mb_check_encoding($data['Buffer'], 'UTF-8')) {
-            // Umwandeln in 1-Byte-Encoding für substr/ord/etc.
-            $payload = mb_convert_encoding($data['Buffer'], 'ISO-8859-1', 'UTF-8');
-        } else {
-            $payload = $data['Buffer']; // wahrscheinlich schon ISO
+        $clientIP = (string)($data['ClientIP'] ?? $data['ClientIp'] ?? '');
+        $clientPort = (int)($data['ClientPort'] ?? $data['ClientPORT'] ?? 0);
+        $type = (int)($data['Type'] ?? -1);
+
+        if (!isset($data['Buffer'])) {
+            $this->SendDebug(__FUNCTION__, '❌ Missing Buffer in incoming data.', 0);
+            $this->SendDebugExtended(__FUNCTION__, '📥 Incoming object: ' . json_encode($data), 0);
+            return '';
         }
-        $clientIP = $data['ClientIP'];
-        $clientPort = intval($data['ClientPort']);
+
+        // Buffer may be plain bytes, plain text, or HEX-encoded (IPSModuleStrict / socket variants)
+        $buffer = (string)$data['Buffer'];
+
+        // If Buffer looks like HEX (even length + only hex chars), decode it
+        if ($buffer !== '' && (strlen($buffer) % 2 === 0) && ctype_xdigit($buffer)) {
+            $decoded = @hex2bin($buffer);
+            if ($decoded !== false) {
+                $buffer = $decoded;
+                $this->SendDebugExtended(__FUNCTION__, '🔁 Buffer was HEX → decoded to bytes (len=' . strlen($buffer) . ')', 0);
+            }
+        }
+
+        // For string operations (headers), keep raw 1-byte string
+        $payload = $buffer;
+
+        // Minimal debug (visible without extended_debug)
+        $typeLabel = match ($type) {
+            self::Socket_Data => 'Data',
+            self::Socket_Connected => 'Connected',
+            self::Socket_Disconnected => 'Disconnected',
+            default => 'Unknown(' . $type . ')'
+        };
+        $this->SendDebug(__FUNCTION__, "📡 Socket Type: {$typeLabel} | From: {$clientIP}:{$clientPort} | PayloadLen: " . strlen($payload), 0);
 
         // Token aus Header extrahieren
         $token = null;
@@ -522,8 +582,6 @@ class Remote3IntegrationDriver extends IPSModule
         $this->SendDebugExtended(__FUNCTION__, '✅ Client-IP: ' . $clientIP . ' | Port: ' . $clientPort, 0);
         // $this->SendDebug(__FUNCTION__, print_r($_SERVER, true), 0);
 
-        // Extract and typecast Type from incoming JSON data
-        $type = intval($data['Type'] ?? -1);
         switch ($type) {
             case self::Socket_Data: // Data
                 $this->SendDebugExtended(__FUNCTION__, "🟢 WebSocket Type: Data", 0);
@@ -542,7 +600,7 @@ class Remote3IntegrationDriver extends IPSModule
         // Prüfen, ob es sich um ein WebSocket-Upgrade handelt
         if ($this->PerformWebSocketHandshake($payload, $clientIP, $clientPort)) {
             $this->SendDebug(__FUNCTION__, '✅ Handshake erkannt und ausgeführt → Abbruch', 0);
-            return;
+            return '';
         }
 
         // WebSocket Payload extrahieren und verarbeiten
@@ -551,7 +609,7 @@ class Remote3IntegrationDriver extends IPSModule
         });
         if ($unpacked === null) {
             $this->SendDebugExtended(__FUNCTION__, '❌ UnpackData() hat null zurückgegeben', 0);
-            return;
+            return '';
         }
 
         if ($unpacked['opcode'] === 0x9) {
@@ -561,7 +619,7 @@ class Remote3IntegrationDriver extends IPSModule
             // $this->SendDebug(__FUNCTION__, '📤 PONG (hex): ' . bin2hex($pong), 0);
             // $this->SendDebug(__FUNCTION__, "📤 [$now] Sende echten PONG-Frame an $clientIP:$clientPort", 0);
             $this->PushPongToRemoteClient($pong, $clientIP, $clientPort);
-            return;
+            return '';
         }
 
         // Einzelne Debug-Ausgaben für jedes entpackte Feld
@@ -570,7 +628,11 @@ class Remote3IntegrationDriver extends IPSModule
         $this->SendDebugExtended(__FUNCTION__, '📦 Opcode Name: ' . $unpacked['opcode_name'], 0);
         $this->SendDebugExtended(__FUNCTION__, '📦 Raw Length: ' . $unpacked['length'], 0);
         $this->SendDebugExtended(__FUNCTION__, '📦 Raw Frame (hex): ' . bin2hex($unpacked['raw']), 0);
-        $jsonText = mb_convert_encoding($unpacked['payload'], 'UTF-8', 'ISO-8859-1');
+        // WebSocket payload is bytes; convert for logging/JSON decoding as UTF-8 best-effort
+        $jsonText = $unpacked['payload'];
+        if (!mb_check_encoding($jsonText, 'UTF-8')) {
+            $jsonText = mb_convert_encoding($jsonText, 'UTF-8', 'ISO-8859-1');
+        }
         $this->SendDebugExtended(__FUNCTION__, '📦 Demaskierter Payload (Klartext): ' . $jsonText, 0);
 
         $this->SendDebugExtended(__FUNCTION__, '✅ Frame wurde erfolgreich entpackt', 0);
@@ -580,7 +642,7 @@ class Remote3IntegrationDriver extends IPSModule
             $this->SendDebugExtended(__FUNCTION__, '❌ Ungültiger JSON Payload im Frame', 0);
             // $this->SendDebug(__FUNCTION__, '➡️ Fallback: Weiterleitung an internen WebHook-Endpunkt...', 0);
             // $this->ForwardToWebhook($unpacked['payload']);
-            return;
+            return '';
         }
 
         $this->SendDebug(__FUNCTION__, '📥 Entpackter Frame: ' . json_encode($json), 0);
@@ -650,6 +712,7 @@ class Remote3IntegrationDriver extends IPSModule
                 $this->SendDebug(__FUNCTION__, '⚠️ Unbekannte Anfrage: ' . $msg, 0);
                 break;
         }
+        return '';
     }
 
 
@@ -1809,27 +1872,37 @@ class Remote3IntegrationDriver extends IPSModule
 
     private function PushToRemoteClient(array $data, string $clientIP, int $clientPort): void
     {
-        $json = json_encode($data);
-        $this->SendDebug(__FUNCTION__, '📤 Antwort an ' . $clientIP . ': ' . $json, 0);
-        $packed = WebSocketUtils::PackData($json);
-        $this->SendDebugExtended(__FUNCTION__, '📤 Packed Data: ' . bin2hex($packed), 0);
+        // Encode message to JSON
+        $json = json_encode($data, JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            $this->SendDebug(__FUNCTION__, '❌ JSON Encoding Error (message): ' . json_last_error_msg(), 0);
+            return;
+        }
 
-        // Zwischenschritt zur besseren Fehlersuche beim JSON-Encoding
+        $this->SendDebug(__FUNCTION__, '📤 Response to ' . $clientIP . ': ' . $json, 0);
+
+        // Pack into a WebSocket frame (binary)
+        $packed = WebSocketUtils::PackData($json);
+        $packedHex = bin2hex($packed);
+        $this->SendDebug(__FUNCTION__, '📤 Packed Data (hex): ' . $packedHex, 0);
+
+        // IMPORTANT: Never put binary into JSON. Send HEX and let the parent (Server Socket) convert back to binary.
         $sendPayload = [
             'DataID' => '{C8792760-65CF-4C53-B5C7-A30FCC84FEFE}', // Server Socket
             'ClientIP' => $clientIP,
             'ClientPort' => $clientPort,
             'Type' => 0,
-            'Buffer' => mb_convert_encoding($packed, 'UTF-8', 'ISO-8859-1')
+            'Buffer' => $packedHex
         ];
 
-        $jsonPayload = json_encode($sendPayload);
+        $jsonPayload = json_encode($sendPayload, JSON_UNESCAPED_SLASHES);
         if ($jsonPayload === false) {
-            $this->SendDebugExtended(__FUNCTION__, '❌ JSON Encoding Error: ' . json_last_error_msg(), 0);
-        } else {
-            $this->SendDebugExtended(__FUNCTION__, '📤 Final JSON Payload: ' . $jsonPayload, 0);
-            $this->SendDataToParent($jsonPayload);
+            $this->SendDebug(__FUNCTION__, '❌ JSON Encoding Error (envelope): ' . json_last_error_msg(), 0);
+            return;
         }
+
+        $this->SendDebug(__FUNCTION__, '📤 Final JSON Payload: ' . $jsonPayload, 0);
+        $this->SendDataToParent($jsonPayload);
     }
 
     public function TestPushToRemote()
@@ -1852,31 +1925,55 @@ class Remote3IntegrationDriver extends IPSModule
 
     /**
      * Sende rohe Strings (z.B. HTTP-Header, WebSocket-Frames) direkt an den Client.
+     * IMPORTANT: Never put binary / raw frame bytes into JSON. Always send HEX and let the parent (Server Socket) convert back to binary.
      */
     private function PushRawToRemoteClient(string $data, string $clientIP, int $clientPort): void
     {
-        $this->SendDebug(__FUNCTION__, '📤 Rohe Antwort an ' . $clientIP . ': ' . $data, 0);
-        $now = date('Y-m-d H:i:s');
-        $this->SendDebug(__FUNCTION__, "📤 [$now] Raw Transmission an $clientIP:$clientPort gestartet", 0);
-        $this->SendDataToParent(json_encode([
+        // IMPORTANT: Never put binary / raw frame bytes into JSON. Always send HEX and let the parent (Server Socket) convert back to binary.
+        $this->SendDebug(__FUNCTION__, '📤 Raw response (string) to ' . $clientIP . ': ' . $data, 0);
+
+        // Convert to bytes as-is and send HEX
+        $hex = bin2hex($data);
+        $this->SendDebug(__FUNCTION__, '📤 Raw response (hex,len=' . strlen($hex) . '): ' . $hex, 0);
+
+        $payload = [
             'DataID' => '{C8792760-65CF-4C53-B5C7-A30FCC84FEFE}', // Server Socket
             'ClientIP' => $clientIP,
             'ClientPort' => $clientPort,
             'Type' => 0,
-            'Buffer' => $data
-        ]));
+            'Buffer' => $hex
+        ];
+
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+        if ($json === false) {
+            $this->SendDebug(__FUNCTION__, '❌ JSON Encoding Error (raw envelope): ' . json_last_error_msg(), 0);
+            return;
+        }
+
+        $this->SendDebug(__FUNCTION__, '📤 Raw envelope to Server Socket: ' . $json, 0);
+        $this->SendDataToParent($json);
     }
 
     private function PushPongToRemoteClient(string $data, string $clientIP, int $clientPort): void
     {
+        // IMPORTANT: Never put binary / raw frame bytes into JSON. Always send HEX and let the parent (Server Socket) convert back to binary.
+        $bytes = mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1');
+        $hex = bin2hex($bytes);
+
         $payload = json_encode([
             'DataID' => '{C8792760-65CF-4C53-B5C7-A30FCC84FEFE}', // Server Socket
             'ClientIP' => $clientIP,
             'ClientPort' => $clientPort,
             'Type' => 0,
-            'Buffer' => mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1')
-        ]);
-        // $this->SendDebug(__FUNCTION__, $server_socket_payload, 0);
+            'Buffer' => $hex
+        ], JSON_UNESCAPED_SLASHES);
+
+        if ($payload === false) {
+            $this->SendDebug(__FUNCTION__, '❌ JSON Encoding Error (pong envelope): ' . json_last_error_msg(), 0);
+            return;
+        }
+
+        $this->SendDebug(__FUNCTION__, '📤 PONG (hex,len=' . strlen($hex) . '): ' . $hex, 0);
         $this->SendDebugExtended(__FUNCTION__, "PONG", 0);
         $this->SendDataToParent($payload);
     }
@@ -3139,7 +3236,7 @@ class Remote3IntegrationDriver extends IPSModule
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
     }
 
-    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    public function MessageSink(int $TimeStamp, int $SenderID, int $Message, array $Data): void
     {
         //Never delete this line!
         parent::MessageSink($TimeStamp, $SenderID, $Message, $Data);
@@ -3701,44 +3798,10 @@ class Remote3IntegrationDriver extends IPSModule
         }
     }
 
-    private function RegisterHook($WebHook)
-    {
-        $ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
-        if (count($ids) > 0) {
-            $hooks = json_decode(IPS_GetProperty($ids[0], 'Hooks'), true);
-            $found = false;
-            foreach ($hooks as $index => $hook) {
-                if ($hook['Hook'] == $WebHook) {
-                    if ($hook['TargetID'] == $this->InstanceID) {
-                        return;
-                    }
-                    $hooks[$index]['TargetID'] = $this->InstanceID;
-                    $found = true;
-                }
-            }
-            if (!$found) {
-                $hooks[] = ['Hook' => $WebHook, 'TargetID' => $this->InstanceID];
-            }
-            IPS_SetProperty($ids[0], 'Hooks', json_encode($hooks));
-            IPS_ApplyChanges($ids[0]);
-        }
-    }
-
-    private function UnregisterHook(string $WebHook)
-    {
-        $ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
-        if (count($ids) > 0) {
-            $hooks = json_decode(IPS_GetProperty($ids[0], 'Hooks'), true);
-            $hooks = array_filter($hooks, fn($hook) => $hook['Hook'] !== $WebHook);
-            IPS_SetProperty($ids[0], 'Hooks', json_encode(array_values($hooks)));
-            IPS_ApplyChanges($ids[0]);
-        }
-    }
-
     /**
      * This function will be called by the hook control. Visibility should be protected!
      */
-    protected function ProcessHookData()
+    protected function ProcessHookData(): void
     {
         $this->SendDebug(__FUNCTION__, '🛜 SERVER REQUEST_URI: ' . ($_SERVER['REQUEST_URI'] ?? '---'), 0);
 
@@ -4206,7 +4269,7 @@ class Remote3IntegrationDriver extends IPSModule
      *
      * @return string
      */
-    public function GetConfigurationForm()
+    public function GetConfigurationForm(): string
     {
         // return current form
         return json_encode(

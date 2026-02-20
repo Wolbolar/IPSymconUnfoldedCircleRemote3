@@ -1,8 +1,14 @@
-# IPSymconHueSyncBox
-[![Version](https://img.shields.io/badge/Symcon-PHPModul-red.svg)](https://www.symcon.de/service/dokumentation/entwicklerbereich/sdk-tools/sdk-php/)
-[![Version](https://img.shields.io/badge/Symcon%20Version-%3E%205.1-green.svg)](https://www.symcon.de/service/dokumentation/installation/)
+# Unfolded Circle Remote 3
 
-Modul für IP-Symcon ab Version 5.1. Ermöglicht das Senden von Befehlen an eine Philips Hue Sync Box und das Anzeigen des Status in IP-Symcon.
+[![Version](https://img.shields.io/badge/Symcon-PHPModul-red.svg)](https://www.symcon.de/service/dokumentation/entwicklerbereich/sdk-tools/sdk-php/)
+[![Version](https://img.shields.io/badge/Symcon%20Version-%3E%208.2-green.svg)](https://www.symcon.de/service/dokumentation/installation/)
+
+Modul für IP-Symcon zur Integration der **Unfolded Circle Remote 3** sowie des **Remote Dock 3**.
+
+Das Modul ermöglicht die bidirektionale Kommunikation mit der Remote 3 über WebSocket, das Empfangen von Echtzeit-Events
+sowie das Auslösen von Aktivitäten und Befehlen aus IP-Symcon.
+
+---
 
 ## Dokumentation
 
@@ -11,326 +17,118 @@ Modul für IP-Symcon ab Version 5.1. Ermöglicht das Senden von Befehlen an eine
 1. [Funktionsumfang](#1-funktionsumfang)  
 2. [Voraussetzungen](#2-voraussetzungen)  
 3. [Installation](#3-installation)  
-4. [Funktionsreferenz](#4-funktionsreferenz)
-5. [Konfiguration](#5-konfiguartion)  
+4. [Einrichtung in IP-Symcon](#4-einrichtung-in-ip-symcon)
+5. [Instanzenübersicht](#5-instanzenübersicht)
 6. [Anhang](#6-anhang)  
+
+---
 
 ## 1. Funktionsumfang
 
-Mit der Philips Hue Sync Box ist es möglich Philips Hue Lampen mit einem anliegenden Video oder Audio Signal zu sychronisieren.
-Das Modul erlaubt die fernsteuerung der Philips Hue Sync Box aus IP-Symcon und das anzeigen der aktuellen Werte der Philips Hue Sync Box in IP-Symcon.
+Mit der Unfolded Circle Remote 3 ist es möglich AV-Geräte, Aktivitäten und Smart-Home-Funktionen zentral zu steuern.
 
-Setzen von:
-- Synchronisierungsmodus
-- Intensität
-- Helligkeit
-- HDMI Input
-- ein- / ausschalten
-- Erweiterte Einstellungen
+Dieses Modul ermöglicht:
 
-Auslesen der aktuellen Einstellungen der Hue Sync Box
+- Aufbau einer WebSocket-Verbindung zur Remote 3
+- Empfang von Echtzeit-Events (z. B. Aktivitätenwechsel, Batteriestatus, Displaystatus, Benutzereingaben)
+- Auslösen von Aktivitäten und Systembefehlen
+- Integration in Automationen, Skripte, Alexa oder HomeKit
+- Verwaltung von Remote 3 und Dock 3 Instanzen
+- Optionale automatische Geräteerkennung über Discovery (mDNS)
+
+---
 
 ## 2. Voraussetzungen
 
- - IPS > 5.1
- - Philips Hue Sync Box
+- IP-Symcon >= 8.2
+- Unfolded Circle Remote 3
+- Optional: Remote Dock 3
+- Netzwerkzugriff zwischen IP-Symcon und Remote 3
+
+---
 
 ## 3. Installation
 
-### a. Richten Sie die Sync Box mit der offiziellen Hue Sync iOS / Android App ein
+### a. Laden des Moduls
 
-Zunächst ist die Philps Hue Sync Box mit der offiziellen Hue Sync iOS / Android App einzurichten.
-Nach der Ersteinrichtung ist darauf zu achten dass ein Upgrade auf die aktuelle Firmware Version durchgeführt wird.
+Die Webconsole von IP-Symcon mit _http://{IP-Symcon IP}:3777/console/_ öffnen.
 
-### b. Laden des Moduls
-
-Die Webconsole von IP-Symcon mit _http://{IP-Symcon IP}:3777/console/_ öffnen. 
-
-
-Anschließend oben rechts auf das Symbol für den Modulstore klicken
+Anschließend oben rechts auf das Symbol für den Modulstore klicken.
 
 ![Store](img/store_icon.png?raw=true "open store")
 
 Im Suchfeld nun
 
 ```
-Philips Hue Sync Box
-```  
+Unfolded Circle Remote 3
+```
 
-eingeben
+eingeben.
 
 ![Store](img/module_store_search.png?raw=true "module search")
 
-und schließend das Modul auswählen und auf _Installieren_
+Das Modul auswählen und auf _Installieren_ klicken.
 
 ![Store](img/install.png?raw=true "install")
 
-drücken.
+---
 
-### c. Einrichtung in IP-Symcon
+## 4. Einrichtung in IP-Symcon
 
-Es wird automatisch eine Discovery Instanz für die Philips Hue Sync Box erstellt. Sollte sich IP-Symcon im gleichem Netzwerk befinden wie die Philips Hue Sync Box wird diese gefunden und kann dann mit _Erstellen_ eine
-Instanz der Philips Hue Sync Box in IP-Symcon erzeugt werden. 
+Nach der Installation wird automatisch eine **Discovery-Instanz** erstellt.
 
-An der Hue Sync Box den Button gedrückt halten bis die LED grün leuchtet und zeitgleich in der Instanz unten auf _Registrieren_ drücken. Es sollte ein Token bezogen werden.
+Diese sucht im lokalen Netzwerk nach:
 
-In der Instanz kann man auswählen das zusätzlich Skripte angelegt werden sollen
+- Remote 3 Geräten
+- Remote Dock 3 Geräten
 
-![huescript](img/hue_sync_scripts.png?raw=true "Webfront")
+Wird ein Gerät gefunden, kann über _Erstellen_ eine entsprechende Instanz angelegt werden:
 
-daraufhin werden zusätzlich Skripte für wichtige Funktionen automatisch erzeugt.
+- **Remote 3 Instanz**
+- **Remote Dock 3 Instanz**
 
-Unter _Eigenschaften_ können optional noch weitere Variablen ausgewählt werden, die im Webfront angezeigt werden sollen.
+Je nach Konfiguration wird eine WebSocket Client Instanz zur Kommunikation verwendet oder automatisch erstellt.
 
-## 4. Funktionsreferenz
+Weitere Einstellungen erfolgen direkt in der jeweiligen Instanz.
 
-### Webfront Ansicht
+---
 
-![webfront](img/hue_sync_webfront.png?raw=true "Webfront")
+## 5. Instanzenübersicht
 
-### mögliche Ansicht in NEO
+### Remote 3 Core Manager
 
-![viewneo](img/hue_sync_box_neo.png?raw=true "View NEO")
+Zentrale Kommunikationsinstanz. Baut die WebSocket-Verbindung zur Remote auf und verteilt eingehende Events an
+untergeordnete Instanzen.
 
-### Hue Sync Box schalten
+### Remote 3 Device
 
-Die Hue Sync Box kann ein- / ausgeschaltet werden, der Input gewechselt werden und der Modus und Instensität eingestellt werden.
+Repräsentiert eine physische Remote 3 und verarbeitet gerätespezifische Events.
 
+### Remote Dock 3
 
-## 5. Konfiguration:
+Repräsentiert ein Dock 3 Gerät.
 
-### Philips Hue Sync Box:
+### Remote Dock 3 Manager
 
-| Eigenschaft   | Typ     | Standardwert | Funktion                           |
-| :-----------: | :-----: | :----------: | :--------------------------------: |
-| Host          | string  |              | IP Adresse der Steckdosenleiste    |
-| Updateinterval| integer |              | Updateinterval in Sekunden         |
+Erweiterte Verwaltungsinstanz für Dock-spezifische Funktionen.
 
+### Remote 3 Integration Driver
+
+Ermöglicht die Anbindung externer Systeme über JSON-RPC.
+
+### Remote 3 Configurator
+
+Unterstützt bei der Einrichtung und Verwaltung von Geräten.
+
+---
 
 ## 6. Anhang
 
-###  a. Funktionen:
+### GUID
 
-#### Philips Hue Sync Box:
+Die GUIDs der einzelnen Instanzen sind im Modulcode definiert und können bei Bedarf in der module.json eingesehen
+werden.
 
-**Basis Geräte Informationen auslesen**
-```php
-HUESYNC_GetDeviceInfo(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
+---
 
-**IP-Symcon an der Philips Hue Sync Box registrieren**
-```php
-HUESYNC_Registration(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-
-#### Folgende Methoden funktionieren nur nachdem IP-Symcon erfolgreich an der Hue Sync Box registriert wurde
-
-**Aktuellen Status der Philips Hue Sync Box auslesen**
-```php
-HUESYNC_GetCurrentState(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Modus einstellen**
-```php
-HUESYNC_Mode(integer $InstanceID, string $mode)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$mode_: passthrough | powersave | video | music | game
-
-**Helligkeit einstellen**
-```php
-HUESYNC_Brightness(integer $InstanceID, integer $brightness)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$brightness_: 0 - 200
-
-**Intensität einstellen**
-```php
-HUESYNC_Intensity(integer $InstanceID, string $mode, string $intensity)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$mode_: video | music | game
-
-Parameter _$intensity_: subtle | moderate | high | intense
-
-**ARC Bypass**
-```php
-HUESYNC_ARC_Bypass(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Auto switch Inputs**
-```php
-HUESYNC_AutoSwitchInputs(integer $InstanceID, integer $input, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$input_: 1 - 4 
-
-Parameter _$state_: true | false 
-
-**Auto Sync Inputs**
-```php
-HUESYNC_AutoSync(integer $InstanceID, integer $input, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$input_: 1 - 4 
-
-Parameter _$state_: true | false 
-
-**CEC Power State Detection**
-```php
-HUESYNC_CEC_PowerStateDetection(integer $InstanceID, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$state_: true | false
-
-**Definiere kontrollierte Entertainment Area**
-```php
-HUESYNC_DefineControlledEntertainmentArea(integer $InstanceID, string $area_id)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$area_id_:  entertainment area id
-
-**Input Namen festlegen**
-```php
-HUESYNC_DefineInputNames(integer $InstanceID, string $name1, string $name2, string $name3, string $name4)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$mode_: video | music | game
-
-Parameter _$name1_: input name input 1
-
-Parameter _$name2_: input name input 2
-
-Parameter _$name3_: input name input 3
-
-Parameter _$name4_: input name input 4
-
-**HDMI inactivity power state**
-```php
-HUESYNC_HDMI_InactivityPowerState(integer $InstanceID, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$state_: true | false
-
-**HDMI input detected**
-```php
-HUESYNC_HDMI_InputDetected(integer $InstanceID, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$state_: true | false
-
-**Power on Philips Hue Sync Box**
-```php
-HUESYNC_PowerOn(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Power off Philips Hue Sync Box**
-```php
-HUESYNC_PowerOff(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Power toggle Philips Hue Sync Box**
-```php
-HUESYNC_PowerToggle(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Restart Philips Hue Sync Box**
-```php
-HUESYNC_RestartSyncBox(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Toogle Hintergrund Beleuchtung**
-```php
-HUESYNC_BackgroundLighting(integer $InstanceID, string $mode, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$mode_: video | game
-
-Parameter _$state_: true | false  
-
-**USB Power State Detection**
-```php
-HUESYNC_USB_PowerStateDetection(integer $InstanceID, boolean $state)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$state_: true | false
-
-**LED Mode**
-```php
-HUESYNC_LEDMode(integer $InstanceID, int $mode)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$mode_: 0 = off | 1 = regular | 2 = dimmed
-
-**Previous SyncMode**
-```php
-HUESYNC_PreviousSyncMode(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Next SyncMode**
-```php
-HUESYNC_NextSyncMode(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Previous HDMI Source**
-```php
-HUESYNC_PreviousHDMISource(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Next SyncMode**
-```php
-HUESYNC_NextHDMISource(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Previous Intensity**
-```php
-HUESYNC_PreviousIntensity(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Next Intensity**
-```php
-HUESYNC_NextIntensity(integer $InstanceID)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-**Palette**
-```php
-HUESYNC_Palette(integer $InstanceID, string $palette)
-``` 
-Parameter _$InstanceID_: ObjektID der Philips Hue Sync Box Instanz.
-
-Parameter _$palette_: happyEnergetic, happyCalm, melancholicCalm, melancholic Energetic, neutral
-
-	 
-###  b. GUIDs und Datenaustausch:
-
-#### Philips Hue Sync Box:
-
-GUID: `{716FA5CE-2292-8EA5-78F9-8B245EFAF0A7}` 
+*Hinweis: Diese Dokumentation stellt ein Grundgerüst dar und wird im Rahmen der Weiterentwicklung des Moduls erweitert.*
