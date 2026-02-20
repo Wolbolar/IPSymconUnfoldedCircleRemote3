@@ -68,7 +68,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->RegisterPropertyString('sensor_mapping', '[]');
         $this->RegisterPropertyString('ip_whitelist', '[]');
 
+        // Propertys fpr Epert Settings
         $this->RegisterPropertyBoolean('extended_debug', false);
+        &this->RegisterPropertyString('callback_IP', '');
 
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
@@ -4013,7 +4015,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
             // Ende Block
 
-            
+
             $this->SendDebugExtended(__FUNCTION__, "🔍 Registriere Treiber bei $ip (Symcon Host: $hostValue)", 0);
             $this->SendDebugExtended(__FUNCTION__, "📡 API-Key: $apiKey | Token: $token", 0);
             $payload = [
@@ -5066,7 +5068,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     ],
                     [
                         'type' => 'ValidationTextBox',
-                        'name' => 'calBackIP',
+                        'name' => 'callback_IP',
                         'caption' => 'Callback IP (IP of Symcon Server, only needed if automatic DNS name is not working)',
 
                     ]
