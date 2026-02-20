@@ -70,7 +70,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         // Propertys fpr Epert Settings
         $this->RegisterPropertyBoolean('extended_debug', false);
-        &this->RegisterPropertyString('callback_IP', '');
+        $this->RegisterPropertyString('callback_IP', '');
 
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
