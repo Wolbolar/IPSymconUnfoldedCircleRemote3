@@ -3999,15 +3999,21 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         foreach ($remotes as $remote) {
+            
+            
             $ip = $remote['host'];
             $apiKey = $remote['api_key'];
-
+            
+            // Nach folgender Code macht kein Sinn da $this->InstanceID nicht die ID der Remote-Instanz sonder der Integration Instant ist.
             $hostIdent = @IPS_GetObjectIDByIdent("host", $this->InstanceID);
             $hostValue = is_int($hostIdent) && $hostIdent > 0 ? @GetValue($hostIdent) : '';
             if ($hostValue === false || $hostValue === '') {
                 // Fallback: Host aus der Remote-Instanz verwenden
                 $hostValue = $ip;
             }
+            // Ende Block
+
+            
             $this->SendDebugExtended(__FUNCTION__, "🔍 Registriere Treiber bei $ip (Symcon Host: $hostValue)", 0);
             $this->SendDebugExtended(__FUNCTION__, "📡 API-Key: $apiKey | Token: $token", 0);
             $payload = [
