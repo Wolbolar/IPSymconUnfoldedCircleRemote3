@@ -101,6 +101,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->RegisterMdnsService();
             $this->SetTimerInterval("PingDeviceState", 30000); // alle 30 Sekunden den Status senden
             $this->SetTimerInterval("UpdateAllEntityStates", 15000); // alle 15 Sekunden den Status senden
+            $this->EnsureTokenInitialized();
         }
         // Register for variable updates for all switches
         $switchMapping = json_decode($this->ReadPropertyString('switch_mapping'), true);
@@ -112,6 +113,26 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
         }
     }
+
+    /**
+     * Ensures that a token exists.
+     * Generates a token only once (first-time instance setup) and never overwrites an existing token.
+     */
+    private function EnsureTokenInitialized(): void
+    {
+        $token = (string)$this->ReadAttributeString('token');
+        if ($token !== '') {
+            return;
+        }
+
+        $token = bin2hex(random_bytes(16)); // 32 characters hex string
+        $this->WriteAttributeString('token', $token);
+        $this->SendDebug(__FUNCTION__, '🔑 Initial token generated: ' . $token, 0);
+
+        // If the configuration form is open, reflect the value immediately.
+        $this->UpdateFormField('token', 'value', $token);
+    }
+
 
     public function GetConfigurationForParent(): string
     {
@@ -3269,6 +3290,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->SetTimerInterval("PingDeviceState", 30000); // alle 30 Sekunden den Status senden
             $this->SetTimerInterval("UpdateAllEntityStates", 15000); // alle 15 Sekunden den Status senden
             $this->SendInitialOnlineEventsForAllClients();
+            $this->EnsureTokenInitialized();
         }
         if ($Message == VM_UPDATE) {
             $this->SendDebug(__FUNCTION__, "📣 Variablen-Update empfangen: ID $SenderID", 0);
@@ -4001,8 +4023,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         foreach ($remotes as $remote) {
-            
-            
+
+
             $ip = $remote['host'];
             $apiKey = $remote['api_key'];
 
@@ -4333,6 +4355,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
      */
     protected function FormHead()
     {
+        $this->EnsureTokenInitialized();
         $token = $this->ReadAttributeString('token');
 
         $form = [
@@ -4345,6 +4368,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 'name' => 'token',
                 'caption' => '🔑 Token',
                 'value' => $token,
+                'enabled' => false
             ],
             [
                 'type' => 'PopupButton',

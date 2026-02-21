@@ -55,7 +55,7 @@ Die Webconsole von IP-Symcon mit _http://{IP-Symcon IP}:3777/console/_ öffnen.
 
 Anschließend oben rechts auf das Symbol für den Modulstore klicken.
 
-![Store](img/store_icon.png?raw=true "open store")
+![store_icon.png](img/store_icon.png)
 
 Im Suchfeld nun
 
@@ -65,11 +65,11 @@ Unfolded Circle Remote 3
 
 eingeben.
 
-![Store](img/module_store_search.png?raw=true "module search")
+![module_store_search.png](img/module_store_search.png)
 
 Das Modul auswählen und auf _Installieren_ klicken.
 
-![Store](img/install.png?raw=true "install")
+![install.png](img/install.png)
 
 ---
 
@@ -90,6 +90,80 @@ Wird ein Gerät gefunden, kann über _Erstellen_ eine entsprechende Instanz ange
 Je nach Konfiguration wird eine WebSocket Client Instanz zur Kommunikation verwendet oder automatisch erstellt.
 
 Weitere Einstellungen erfolgen direkt in der jeweiligen Instanz.
+
+### Ersteinrichtung
+
+#### Remote 3 einrichten
+
+Achten sie darauf das beim Einrichtungsprozess die Remote 3 im Wachzustand ist und stellen sie diese am besten in das
+Dock 3, wenn vorhanden.
+Legen Sie zunächst mit rechter Mausklick im Objektbaum auf *Objekt hinzufügen* -> *Instanz* eine neue *Remote 3
+Discovery* Instanz an.
+
+![Add Remote Discovery.png](img/Add%20Remote%20Discovery.png)
+
+Nach dem öffnen der Discovery Instanz geben sie oben das vierstellige Webpasswort der Remote 3 an, das auf dem Display
+der Remote 3 angezeigt wird.
+
+![Discovery Eingabe Webpasswort.png](img/Discovery%20Eingabe%20Webpasswort.png)
+
+Wählen sie nun aus den gefunden Geräten das aus was sie in Symcon neu anlegen wollen
+
+![Remote 3 Discovery.png](img/Remote%203%20Discovery.png)
+
+und klicken dann auf *Erstellen*
+
+Bevor sie fortfahren achten sie darauf das die Remote 3 im Wachzustand ist, das Display also an ist.
+Im Objektbaum öffnen sie nun die Instanz *Remote 3 Core Manager Remotexxx*.
+Ganz oben finden sie den Hinweis
+![Instanz konfigurieren.png](img/Instanz%20konfigurieren.png)
+
+klicken sie hier auf *Konfigurieren*.
+es öffnet sich ein neues Fenster hier werden aufgefordert mit ok zu bestätigen.
+
+Setzen sie nun oben
+
+![Aktiv.png](img/Aktiv.png)
+
+auf an.
+
+Anschließend klicken sie auf
+
+![Apply Changes.png](img/Apply%20Changes.png)
+
+*Änderungen übernehmen*.
+
+Die Remote 3 ist jetzt für die Ersteinrichtung in Symcon konfiguriert, sie können jetzt in die Instanz der Remote 3 im
+Objektbaum wechseln und dort die Informationen zur Remote 3 einsehen.
+
+Die Remote 3 Instanz dient dazu Systeminformationen der Remote 3 anzuzeigen, wie den Online Status der Remote 3 oder
+aber auch Batteriestatus usw. Sollte sich ein Zustand der remote 3 ändern
+wird dieser automatisch in Symcon aktualisiert.
+
+#### Remote 3 Integration Driver einrichten
+
+Der *Remote 3 Integration Driver* dient dazu Geräte aus Symcon in die Remote 3 importieren zu können und diese aus der
+Benutzeroberfläche der Remote 3 ansteuern zu können.
+
+Legen Sie mit rechter Mausklick im Objektbaum auf *Objekt hinzufügen* -> *Instanz* eine neue *Remote 3 Integration
+Driver* Instanz an.
+
+Es öffnet sich ein Fenster
+
+![Server Socket.png](img/Server%20Socket.png)
+
+klicken sie hier auf *Aktiv* auf *ein* und bestätigen dann mit *OK*.
+
+Sie finden nun in der Instanz eine Auswahl von Gerätetypen, die von der Remote 3 angesteuert werden können. Damit die
+Remote 3 ein Gerät in Symcon stuern darf bzw. dies auf der Remote 3 zum Import überhaupt zur Verfügung steht,
+muss das Gerät in der *Remote 3 Integration Driver* unter dem entsprechendem Gerätetyp hinzugefügt werden.
+
+![Remote 3 Integration Driver.png](img/Remote%203%20Integration%20Driver.png)
+
+Dazu den Gerätetyp öffnen und dort mit Hinzufügen das gewünschte Gerät hinzufügen. Je nach Gerätetyp müssen
+unterschiedliche Variablen des Geräts einmalig zugewiesen werden.
+
+
 
 ---
 
