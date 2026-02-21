@@ -974,6 +974,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'msg' => 'driver_metadata',
             'msg_data' => [
                 'driver_id' => 'uc_symcon_driver',
+                'auth_method' => "HEADER",
                 'version' => self::Unfolded_Circle_Driver_Version,
                 'min_core_api' => self::Unfolded_Circle_API_Minimum_Version,
                 'name' => [
