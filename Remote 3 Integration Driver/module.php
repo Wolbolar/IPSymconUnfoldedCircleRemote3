@@ -838,8 +838,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     private function FindDeviceInstanceByIp(string $guid, string $property, string $ip): int
     {
         $instanceIDs = IPS_GetInstanceListByModuleID($guid);
+        $this->SendDebugExtended(__FUNCTION__, "🔍 Suche nach Instanz mit GUID $guid, Ergebnis ist: " . json_encode($instanceIDs), 0);
         foreach ($instanceIDs as $id) {
             $prop = @IPS_GetProperty($id, $property);
+            $this->SendDebugExtended(__FUNCTION__, "🔎 Prüfe Instanz $id: $property = $prop", 0);
             if ($prop === $ip) {
                 $this->SendDebug(__FUNCTION__, "🎯 Gefundene Instanz für IP $ip: $id", 0);
                 return $id;
@@ -998,6 +1000,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'msg' => 'driver_metadata',
             'msg_data' => [
                 'driver_id' => 'uc_symcon_driver',
+                'auth_method' => "HEADER",
                 'version' => self::Unfolded_Circle_Driver_Version,
                 'min_core_api' => self::Unfolded_Circle_API_Minimum_Version,
                 'name' => [
@@ -3955,7 +3958,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $token = $this->ReadAttributeString('token');
 
         if (!is_array($remotes)) {
-            $this->SendDebug(__FUNCTION__, "❌ Keine Remote-Instanzen gefunden", 0);
+            $this->SendDebug(__FUNCTION__, "❌ Keine Core Manager-Instanzen gefunden", 0);
             return;
         }
 
@@ -3984,7 +3987,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 ],
                 'driver_url' => 'ws://' . $hostValue . ':9988',
                 'token' => $token,
-                'auth_method' => 'MESSAGE',
+                'auth_method' => 'HEADER',
+                //'auth_method' => 'MESSAGE',
                 'version' => '0.0.1',
                 'icon' => 'custom:symcon_icon.png',
                 'enabled' => true,
@@ -5049,7 +5053,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     [
                         'type' => 'ValidationTextBox',
                         'name' => 'callback_IP',
-                        'caption' => 'Callback IP (IP of Symcon Server, only needed if automatic DNS name is not working)'
+                        'caption' => 'Callback IP (IP of Symcon Server, only needed if automatic DNS name is not working)',
+                        'width' => '90%'
                     ],
                     [
                         'type' => 'Button',
