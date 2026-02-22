@@ -55,6 +55,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         $this->RegisterAttributeString('log_commands', '');
 
+        $this->RegisterAttributeString('vm_update_vars', '[]');
+
 
         // Properties for Button and Switch mapping configuration
         $this->RegisterPropertyString('button_mapping', '[]');
@@ -119,15 +121,128 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->SetTimerInterval("UpdateAllEntityStates", 15000); // alle 15 Sekunden den Status senden
             $this->EnsureTokenInitialized();
         }
-        // Register for variable updates for all switches
+        // Register for variable updates for all mapped entities (switches, sensors, lights, covers, climate, media)
+        $this->SyncVmUpdateRegistrations();
+
+        // Register for status changes of the I/O (WebSocket) instance
+        $parentID = IPS_GetInstance($this->InstanceID)['ConnectionID'];
+        if ($parentID > 0) {
+            $this->RegisterMessage($parentID, IM_CHANGESTATUS);
+        }
+    }
+
+    /**
+     * Collect all variable IDs referenced by mapping properties.
+     * @return int[]
+     */
+    private function CollectMappedVarIds(): array
+    {
+        $ids = [];
+
+        $add = function ($id) use (&$ids) {
+            $id = (int)$id;
+            if ($id > 0 && IPS_VariableExists($id)) {
+                $ids[$id] = true;
+            }
+        };
+
+        // switch
         $switchMapping = json_decode($this->ReadPropertyString('switch_mapping'), true);
         if (is_array($switchMapping)) {
-            foreach ($switchMapping as $entry) {
-                if (isset($entry['var_id']) && is_numeric($entry['var_id'])) {
-                    $this->RegisterMessage((int)$entry['var_id'], VM_UPDATE);
+            foreach ($switchMapping as $e) {
+                $add($e['var_id'] ?? 0);
+            }
+        }
+
+        // sensor
+        $sensorMapping = json_decode($this->ReadPropertyString('sensor_mapping'), true);
+        if (is_array($sensorMapping)) {
+            foreach ($sensorMapping as $e) {
+                $add($e['var_id'] ?? 0);
+            }
+        }
+
+        // light
+        $lightMapping = json_decode($this->ReadPropertyString('light_mapping'), true);
+        if (is_array($lightMapping)) {
+            foreach ($lightMapping as $e) {
+                $add($e['switch_var_id'] ?? 0);
+                $add($e['brightness_var_id'] ?? 0);
+                $add($e['color_var_id'] ?? 0);
+                $add($e['color_temp_var_id'] ?? 0);
+            }
+        }
+
+        // cover
+        $coverMapping = json_decode($this->ReadPropertyString('cover_mapping'), true);
+        if (is_array($coverMapping)) {
+            foreach ($coverMapping as $e) {
+                $add($e['position_var_id'] ?? 0);
+                $add($e['control_var_id'] ?? 0);
+            }
+        }
+
+        // climate
+        $climateMapping = json_decode($this->ReadPropertyString('climate_mapping'), true);
+        if (is_array($climateMapping)) {
+            foreach ($climateMapping as $e) {
+                $add($e['status_var_id'] ?? 0);
+                $add($e['current_temp_var_id'] ?? 0);
+                $add($e['target_temp_var_id'] ?? 0);
+                $add($e['mode_var_id'] ?? 0);
+            }
+        }
+
+        // media_player (features)
+        $mediaMapping = json_decode($this->ReadPropertyString('media_player_mapping'), true);
+        if (is_array($mediaMapping)) {
+            foreach ($mediaMapping as $e) {
+                if (!isset($e['features']) || !is_array($e['features'])) {
+                    continue;
+                }
+                foreach ($e['features'] as $f) {
+                    $add($f['var_id'] ?? 0);
                 }
             }
         }
+
+        return array_map('intval', array_keys($ids));
+    }
+
+    /**
+     * Register VM_UPDATE for all mapped variables and unregister obsolete registrations.
+     */
+    private function SyncVmUpdateRegistrations(): void
+    {
+        $newIds = $this->CollectMappedVarIds();
+        sort($newIds);
+
+        $oldIds = json_decode($this->ReadAttributeString('vm_update_vars'), true);
+        if (!is_array($oldIds)) {
+            $oldIds = [];
+        }
+        $oldIds = array_map('intval', $oldIds);
+        sort($oldIds);
+
+        $newSet = array_fill_keys($newIds, true);
+        $oldSet = array_fill_keys($oldIds, true);
+
+        // Unregister removed
+        foreach ($oldIds as $id) {
+            if (!isset($newSet[$id])) {
+                $this->UnregisterMessage($id, VM_UPDATE);
+            }
+        }
+
+        // Register new
+        foreach ($newIds as $id) {
+            if (!isset($oldSet[$id])) {
+                $this->RegisterMessage($id, VM_UPDATE);
+            }
+        }
+
+        $this->WriteAttributeString('vm_update_vars', json_encode($newIds));
+        $this->SendDebug(__FUNCTION__, '📣 VM_UPDATE synced for ' . count($newIds) . ' variables', 0);
     }
 
     /**
@@ -4406,16 +4521,26 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     }
 
     /**
-     * Override SendDebug so ALL existing $this->SendDebug(...) calls go through the filter.
+     * Custom SendDebug implementation with filtering and throttling.
+     * Temporarily disabled to restore original IPSModuleStrict::SendDebug() behavior.
+     * Use SendDebugFiltered() for filtered debug output instead.
      */
-    public function SendDebug($Message, $Data, $Format): bool
+    public function SendDebugFiltered($Message, $Data, $Format): bool
     {
         // If expert debug is OFF: keep old behavior, but allow debug_level=0 to silence.
         if (!(bool)$this->ReadPropertyBoolean('expert_debug')) {
             if ((int)$this->ReadPropertyInteger('debug_level') <= 0) {
                 return false;
             }
-            return parent::SendDebug($Message, $Data, $Format);
+            // Ensure Data is string for IPSModuleStrict compatibility
+            if (is_string($Data)) {
+                $dataOut = $Data;
+            } elseif (is_scalar($Data)) {
+                $dataOut = (string)$Data;
+            } else {
+                $dataOut = json_encode($Data, JSON_UNESCAPED_SLASHES);
+            }
+            return parent::SendDebug($Message, $dataOut, $Format);
         }
 
         // Determine topic+level heuristically
@@ -4454,7 +4579,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             return false;
         }
 
-        return parent::SendDebug($Message, $Data, $Format);
+        // Ensure Data is string for IPSModuleStrict compatibility
+        if (is_string($Data)) {
+            $dataOut = $Data;
+        } elseif (is_scalar($Data)) {
+            $dataOut = (string)$Data;
+        } else {
+            $dataOut = json_encode($Data, JSON_UNESCAPED_SLASHES);
+        }
+
+        return parent::SendDebug($Message, $dataOut, $Format);
     }
 
     private function SendDebugExtended($Message, $Data, $Format = 0): void
@@ -4479,6 +4613,29 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         parent::SendDebug($Message, $Data, $Format);
+    }
+
+    /**
+     * Test method to manually trigger filtered debug output.
+     * Can be called via IPS console or temporary button.
+     */
+    public function TestFilteredDebug(): void
+    {
+        $this->SendDebugFiltered('[TEST] Basic INFO message', 'ℹ️ Test info output', 0);
+
+        $this->SendDebugFiltered('[WS_TX] Simulated transmit', '📤 Sending sample payload to 192.168.0.50:12345', 0);
+
+        $this->SendDebugFiltered('[ENTITY] Simulated entity change', [
+            'entity_id' => 'sensor_12345',
+            'value' => 42,
+            'unit' => '°C'
+        ], 0);
+
+        $this->SendDebugFiltered('[ERROR] Simulated error case', '❌ Something went wrong', 0);
+
+        $this->SendDebugFiltered('[TRACE] High frequency event', '🔁 Repeating event simulation', 0);
+
+        parent::SendDebug(__FUNCTION__, '✅ TestFilteredDebug executed', 0);
     }
 
     /**
