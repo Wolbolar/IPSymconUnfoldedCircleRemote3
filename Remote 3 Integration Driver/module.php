@@ -719,12 +719,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->authenticateClient($clientIP, $clientPort, $token);
         }
 
-        // Fallback: Token aus JSON extrahieren
+        // Fallback: Token aus JSON extrahieren (nur wenn Payload bereits gültiges UTF-8 ist)
         if ($token === null) {
-            $jsonText = mb_convert_encoding($payload, 'UTF-8', 'ISO-8859-1');
-            $payloadJson = json_decode($jsonText, true);
+            $payloadJson = null;
+            if ($payload !== '' && mb_check_encoding($payload, 'UTF-8')) {
+                $payloadJson = json_decode($payload, true);
+            }
             if (is_array($payloadJson) && isset($payloadJson['auth-token'])) {
-                $token = $payloadJson['auth-token'];
+                $token = (string)$payloadJson['auth-token'];
                 $this->SendDebug(__FUNCTION__, "🔑 Auth-Token aus JSON-Message extrahiert: $token", 0);
             }
         }
@@ -782,20 +784,19 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->SendDebugExtended(__FUNCTION__, '📦 Opcode Name: ' . $unpacked['opcode_name'], 0);
         $this->SendDebugExtended(__FUNCTION__, '📦 Raw Length: ' . $unpacked['length'], 0);
         $this->SendDebugExtended(__FUNCTION__, '📦 Raw Frame (hex): ' . bin2hex($unpacked['raw']), 0);
-        // WebSocket payload is bytes; convert for logging/JSON decoding as UTF-8 best-effort
-        $jsonText = $unpacked['payload'];
-        if (!mb_check_encoding($jsonText, 'UTF-8')) {
-            $jsonText = mb_convert_encoding($jsonText, 'UTF-8', 'ISO-8859-1');
+        // WebSocket payload is bytes; JSON must be UTF-8. Do not re-encode raw bytes.
+        $jsonText = (string)$unpacked['payload'];
+        if ($jsonText !== '' && !mb_check_encoding($jsonText, 'UTF-8')) {
+            $this->SendDebugExtended(__FUNCTION__, '❌ Payload is not valid UTF-8 – skipping JSON decode (len=' . strlen($jsonText) . ')', 0);
+            return '';
         }
-        $this->SendDebugExtended(__FUNCTION__, '📦 Demaskierter Payload (Klartext): ' . $jsonText, 0);
 
+        $this->SendDebugExtended(__FUNCTION__, '📦 Demaskierter Payload (Klartext): ' . $jsonText, 0);
         $this->SendDebugExtended(__FUNCTION__, '✅ Frame wurde erfolgreich entpackt', 0);
 
         $json = json_decode($jsonText, true);
         if (!is_array($json)) {
             $this->SendDebugExtended(__FUNCTION__, '❌ Ungültiger JSON Payload im Frame', 0);
-            // $this->SendDebug(__FUNCTION__, '➡️ Fallback: Weiterleitung an internen WebHook-Endpunkt...', 0);
-            // $this->ForwardToWebhook($unpacked['payload']);
             return '';
         }
 
@@ -2044,9 +2045,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
     private function PushPongToRemoteClient(string $data, string $clientIP, int $clientPort): void
     {
-        // IMPORTANT: Never put binary / raw frame bytes into JSON. Always send HEX and let the parent (Server Socket) convert back to binary.
-        $bytes = mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1');
-        $hex = bin2hex($bytes);
+        // IMPORTANT: Do not perform any encoding conversion here.
+        // $data already contains the exact bytes of the WebSocket frame/payload.
+        // Any encoding conversion may change the byte sequence and break PONG handling.
+        $hex = bin2hex($data);
 
         $payload = json_encode([
             'DataID' => '{C8792760-65CF-4C53-B5C7-A30FCC84FEFE}', // Server Socket
