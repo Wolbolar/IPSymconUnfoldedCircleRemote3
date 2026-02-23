@@ -300,6 +300,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_VM, '📣 VM_UPDATE synced for ' . count($newIds) . ' variables', 0);
     }
 
+
     /**
      * Ensures that a token exists.
      * Generates a token only once (first-time instance setup) and never overwrites an existing token.
@@ -317,6 +318,22 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         // If the configuration form is open, reflect the value immediately.
         $this->UpdateFormField('token', 'value', $token);
+    }
+
+    /**
+     * Mask token for logs (avoid leaking secrets).
+     */
+    private function MaskToken(?string $t): string
+    {
+        $t = (string)$t;
+        if ($t === '') {
+            return '(none)';
+        }
+        $len = strlen($t);
+        if ($len <= 8) {
+            return str_repeat('*', $len);
+        }
+        return substr($t, 0, 4) . '…' . substr($t, -4) . " (len=$len)";
     }
 
 
@@ -760,17 +777,30 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         };
         $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_WS, "📡 Socket Type: {$typeLabel} | From: {$clientIP}:{$clientPort} | PayloadLen: " . strlen($payload), 0);
 
-        // Token aus Header extrahieren
+        // Token aus Header extrahieren (nur bis Zeilenende)
         $token = null;
-        if (preg_match('/auth-token:\s*(.+)/i', $payload, $matches)) {
-            $token = trim($matches[1]);
-            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_AUTH, "🔑 Auth token extracted from header: $token", 0);
-        }
+        if (preg_match('/\bauth-token\s*:\s*([^\r\n]+)/i', $payload, $matches)) {
+            $token = trim((string)$matches[1]);
 
-        // Direkt nach Header-Token-Erkennung authentifizieren
-        if (!empty($token)) {
-            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_AUTH, '✅ Authenticating immediately after header token detection', 0);
-            $this->authenticateClient($clientIP, $clientPort, $token);
+            $storedToken = (string)$this->ReadAttributeString('token');
+            $hasStored = ($storedToken !== '');
+            $match = ($token !== '' && $hasStored && hash_equals($storedToken, $token));
+
+            $this->Debug(
+                __FUNCTION__,
+                $match ? self::LV_INFO : self::LV_WARN,
+                self::TOPIC_AUTH,
+                '🔑 Auth token extracted from header: remote=' . $this->MaskToken($token) . ' local=' . $this->MaskToken($storedToken) . ' match=' . ($match ? '✅' : '❌') . ($hasStored ? '' : ' (local token missing)'),
+                0
+            );
+
+            // Direkt nach Header-Token-Erkennung authentifizieren (nur bei Match)
+            if ($match) {
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_AUTH, '✅ Header token matches → marking client authenticated', 0);
+                $this->authenticateClient($clientIP, $clientPort, $token);
+            } else {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_AUTH, '⛔ Header token missing/mismatch → client NOT authenticated (commands should be blocked later)', 0);
+            }
         }
 
         // Fallback: Token aus JSON extrahieren (nur wenn Payload bereits gültiges UTF-8 ist)
@@ -781,7 +811,23 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
             if (is_array($payloadJson) && isset($payloadJson['auth-token'])) {
                 $token = (string)$payloadJson['auth-token'];
-                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_AUTH, "🔑 Auth token extracted from JSON message: $token", 0);
+                $storedToken = (string)$this->ReadAttributeString('token');
+                $hasStored = ($storedToken !== '');
+                $match = ($token !== '' && $hasStored && hash_equals($storedToken, $token));
+                $this->Debug(
+                    __FUNCTION__,
+                    $match ? self::LV_INFO : self::LV_WARN,
+                    self::TOPIC_AUTH,
+                    '🔑 Auth token extracted from JSON message: remote=' . $this->MaskToken($token) . ' local=' . $this->MaskToken($storedToken) . ' match=' . ($match ? '✅' : '❌') . ($hasStored ? '' : ' (local token missing)'),
+                    0
+                );
+
+                if ($match) {
+                    $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_AUTH, '✅ JSON token matches → marking client authenticated', 0);
+                    $this->authenticateClient($clientIP, $clientPort, $token);
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_AUTH, '⛔ JSON token missing/mismatch → client NOT authenticated (commands should be blocked later)', 0);
+                }
             }
         }
 
@@ -874,9 +920,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 break;
 
             case 'setup_driver':
-                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_AUTH, '🛠️ Setup start received', 0);
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🛠️ setup_driver received → starting interactive setup flow', 0);
                 $this->SendResultOK($reqId, $clientIP, $clientPort);
-                $this->NotifyDriverSetupComplete($clientIP, $clientPort);
+                $this->StartDriverSetupFlow($clientIP, $clientPort);
                 break;
 
             case 'set_driver_user_data':
@@ -1251,20 +1297,38 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
     private function HandleSetDriverUserData_Simple(array $json, int $reqId, string $clientIP, int $clientPort): void
     {
-        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_FORM, '📥 Setup-Daten vom Benutzer empfangen (vereinfachter Flow)', 0);
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '📥 set_driver_user_data received (SIMPLE flow)', 0);
 
-        $confirmation = [
-            'kind' => 'resp',
-            'req_id' => $reqId,
-            'code' => 200,
-            'msg' => 'result',
-            'msg_data' => [
-                'setup_action' => [
-                    'type' => 'setup_complete'
-                ]
-            ]
-        ];
-        $this->PushToRemoteClient($confirmation, $clientIP, $clientPort);
+        // Always acknowledge the request
+        $this->SendResultOK($reqId, $clientIP, $clientPort);
+
+        // Parse input values
+        $inputValues = $json['msg_data']['input_values'] ?? [];
+        $tokenUser = (string)($inputValues['token'] ?? '');
+        $tokenStored = (string)$this->ReadAttributeString('token');
+
+        if ($tokenUser === '') {
+            // If nothing provided, still allow user to continue by showing the token page.
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '⚠️ No token provided → requesting input again', 0);
+            $this->RequestTokenAgain($clientIP, $clientPort,
+                'Bitte trage den Token ein oder bestätige den vorausgefüllten Token.',
+                'Please enter the token or confirm the prefilled token.'
+            );
+            return;
+        }
+
+        if ($tokenUser !== $tokenStored) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '❌ Token mismatch from user input', 0);
+            $this->RequestTokenAgain($clientIP, $clientPort,
+                'Der eingegebene Token stimmt nicht mit dem Symcon-Token überein. Bitte erneut prüfen.',
+                'The entered token does not match the Symcon token. Please verify and try again.'
+            );
+            return;
+        }
+
+        // Token accepted. Finish setup so the remote creates the integration instance.
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token accepted → finishing setup', 0);
+        $this->FinishDriverSetupOK($clientIP, $clientPort);
     }
 
     private function HandleSetDriverUserData_Complex(array $json, int $reqId, string $clientIP, int $clientPort): void
@@ -1287,118 +1351,30 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         // STEP 1: Confirmation
         if (isset($inputValues['step1.confirmation'])) {
             $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_FORM, '➡️ Schritt 1: Einleitung bestätigt', 0);
-
-            $token = $this->ReadAttributeString('token');
-            if (empty($token)) {
-                $this->GenerateToken();
-                $token = $this->ReadAttributeString('token');
-            }
-
-            $nextStep = [
-                'kind' => 'resp',
-                'req_id' => $reqId,
-                'code' => 200,
-                'msg' => 'result',
-                'msg_data' => [
-                    'setup_action' => [
-                        'type' => 'request_user_data',
-                        'input' => [
-                            'title' => ['en' => 'Access Token'],
-                            'settings' => [
-                                [
-                                    'id' => 'step2.token',
-                                    'label' => [
-                                        'en' => 'Token for remote access',
-                                        'de' => 'Token für Remote-Zugriff'
-                                    ],
-                                    'field' => [
-                                        'text' => [
-                                            'value' => $token
-                                        ]
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ];
-            $this->PushToRemoteClient($nextStep, $clientIP, $clientPort);
-
+            // Always acknowledge set_driver_user_data
+            $this->SendResultOK($reqId, $clientIP, $clientPort);
+            $this->StartDriverSetupFlow($clientIP, $clientPort);
+            return;
         } elseif (isset($inputValues['step2.token'])) {
 
-            $tokenUser = $inputValues['step2.token'];
-            $tokenStored = $this->ReadAttributeString('token');
+            $tokenUser = (string)$inputValues['step2.token'];
+            $tokenStored = (string)$this->ReadAttributeString('token');
+
+            // Always acknowledge set_driver_user_data
+            $this->SendResultOK($reqId, $clientIP, $clientPort);
 
             if ($tokenUser !== $tokenStored) {
-                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_FORM, "❌ Ungültiger Token: $tokenUser", 0);
-
-                $retryStep = [
-                    'kind' => 'resp',
-                    'req_id' => $reqId,
-                    'code' => 200,
-                    'msg' => 'result',
-                    'msg_data' => [
-                        'setup_action' => [
-                            'type' => 'request_user_data',
-                            'input' => [
-                                'title' => ['en' => 'Invalid Token'],
-                                'settings' => [
-                                    [
-                                        'id' => 'step2.token',
-                                        'label' => [
-                                            'en' => 'Invalid token. Please try again:',
-                                            'de' => 'Ungültiger Token. Bitte erneut eingeben:'
-                                        ],
-                                        'field' => [
-                                            'text' => [
-                                                'value' => ''
-                                            ]
-                                        ]
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]
-                ];
-                $this->PushToRemoteClient($retryStep, $clientIP, $clientPort);
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, "❌ Invalid token in complex flow: $tokenUser", 0);
+                $this->RequestTokenAgain($clientIP, $clientPort,
+                    'Ungültiger Token. Bitte erneut eingeben oder den vorausgefüllten Token bestätigen.',
+                    'Invalid token. Please re-enter or confirm the prefilled token.'
+                );
                 return;
             }
 
-            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_FORM, "✅ Gültiger Token bestätigt", 0);
-
-            $confirmationStep = [
-                'kind' => 'resp',
-                'req_id' => $reqId,
-                'code' => 200,
-                'msg' => 'result',
-                'msg_data' => [
-                    'setup_action' => [
-                        'type' => 'request_user_data',
-                        'input' => [
-                            'title' => ['en' => 'Token Valid'],
-                            'settings' => [
-                                [
-                                    'id' => 'step3.ready',
-                                    'label' => [
-                                        'en' => 'Token accepted. You can now proceed to device selection.',
-                                        'de' => 'Token akzeptiert. Du kannst jetzt mit der Geräteauswahl fortfahren.'
-                                    ],
-                                    'field' => [
-                                        'label' => [
-                                            'value' => [
-                                                'en' => 'Setup complete – Remote 3 will now request available devices.',
-                                                'de' => 'Setup abgeschlossen – Remote 3 wird nun die verfügbaren Geräte abfragen.'
-                                            ]
-                                        ]
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ];
-            $this->PushToRemoteClient($confirmationStep, $clientIP, $clientPort);
-
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token confirmed (complex flow) → finishing setup', 0);
+            $this->FinishDriverSetupOK($clientIP, $clientPort);
+            return;
         } elseif (isset($inputValues['step3.device_selection']) || isset($inputValues['step3.ready'])) {
 
             $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_FORM, "✅ Geräteauswahl abgeschlossen", 0);
@@ -1417,9 +1393,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->PushToRemoteClient($nextStep, $clientIP, $clientPort);
 
         } else {
-
             $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_FORM, '⚠️ Unbekannte oder fehlende Eingabewerte', 0);
             $this->SendResultOK($reqId, $clientIP, $clientPort);
+            $this->StartDriverSetupFlow($clientIP, $clientPort);
         }
     }
 
@@ -1963,6 +1939,151 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'msg_data' => new stdClass()
         ];
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
+    }
+
+    /**
+     * Start the driver setup flow by requesting a token from the user.
+     * According to the UC integration asyncapi, after confirming `setup_driver`, the driver must emit
+     * `driver_setup_change` events (SETUP/WAIT_USER_ACTION/STOP).
+     */
+    private function StartDriverSetupFlow(string $clientIP, int $clientPort): void
+    {
+        // Ensure we have a token on first setup, but never overwrite an existing one.
+        $this->EnsureTokenInitialized();
+        $token = (string)$this->ReadAttributeString('token');
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '➡️ Requesting user token input (prefilled) via driver_setup_change WAIT_USER_ACTION', 0);
+
+        // Ask the remote UI to show a token input page. Prefill with current token so the user can simply click Next.
+        // NOTE: Full background/automatic token provisioning is not supported by the setup flow spec itself;
+        // driver registration via REST would be the fully automatic alternative.
+        $page = [
+            'title' => [
+                'en' => 'Access Token',
+                'de' => 'Zugriffs-Token'
+            ],
+            'settings' => [
+                [
+                    'id' => 'token',
+                    'label' => [
+                        'en' => 'Token for Symcon remote access',
+                        'de' => 'Token für den Remote-Zugriff auf Symcon'
+                    ],
+                    'field' => [
+                        'text' => [
+                            'value' => $token
+                        ]
+                    ]
+                ],
+                [
+                    'id' => 'hint',
+                    'label' => [
+                        'en' => 'Tip',
+                        'de' => 'Hinweis'
+                    ],
+                    'field' => [
+                        'label' => [
+                            'value' => [
+                                'en' => 'If the field is prefilled, just press Next. The Remote will store the token and use it for future connections.',
+                                'de' => 'Wenn das Feld bereits ausgefüllt ist, einfach auf Weiter klicken. Die Remote speichert den Token und nutzt ihn für zukünftige Verbindungen.'
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ];
+
+        $this->SendDriverSetupChange($clientIP, $clientPort, 'SETUP', 'WAIT_USER_ACTION', [
+            'input' => $page
+        ]);
+    }
+
+    /**
+     * Emit a driver_setup_change event.
+     * @param string $eventType One of: START/SETUP/STOP (spec uses SETUP + STOP here)
+     * @param string $state One of: SETUP/WAIT_USER_ACTION/OK/ERROR
+     */
+    private function SendDriverSetupChange(string $clientIP, int $clientPort, string $eventType, string $state, ?array $requireUserAction = null, string $error = 'NONE'): void
+    {
+        $msgData = [
+            'event_type' => $eventType,
+            'state' => $state
+        ];
+
+        if ($state === 'ERROR') {
+            $msgData['error'] = $error;
+        }
+
+        if ($requireUserAction !== null) {
+            $msgData['require_user_action'] = $requireUserAction;
+        }
+
+        $payload = [
+            'kind' => 'event',
+            'msg' => 'driver_setup_change',
+            'cat' => 'DEVICE',
+            'msg_data' => $msgData
+        ];
+
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_SETUP, '📤 driver_setup_change → ' . json_encode($payload), 0);
+        $this->PushToRemoteClient($payload, $clientIP, $clientPort);
+    }
+
+    /**
+     * Convenience: Finish setup successfully.
+     */
+    private function FinishDriverSetupOK(string $clientIP, int $clientPort): void
+    {
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Finishing setup: driver_setup_change STOP/OK', 0);
+        $this->SendDriverSetupChange($clientIP, $clientPort, 'STOP', 'OK');
+    }
+
+    /**
+     * Convenience: Ask for token again with an error hint.
+     */
+    private function RequestTokenAgain(string $clientIP, int $clientPort, string $messageDe, string $messageEn): void
+    {
+        $token = (string)$this->ReadAttributeString('token');
+
+        $page = [
+            'title' => [
+                'en' => 'Invalid Token',
+                'de' => 'Ungültiger Token'
+            ],
+            'settings' => [
+                [
+                    'id' => 'error',
+                    'label' => [
+                        'en' => 'Error',
+                        'de' => 'Fehler'
+                    ],
+                    'field' => [
+                        'label' => [
+                            'value' => [
+                                'en' => $messageEn,
+                                'de' => $messageDe
+                            ]
+                        ]
+                    ]
+                ],
+                [
+                    'id' => 'token',
+                    'label' => [
+                        'en' => 'Token for Symcon remote access',
+                        'de' => 'Token für den Remote-Zugriff auf Symcon'
+                    ],
+                    'field' => [
+                        'text' => [
+                            'value' => $token
+                        ]
+                    ]
+                ]
+            ]
+        ];
+
+        $this->SendDriverSetupChange($clientIP, $clientPort, 'SETUP', 'WAIT_USER_ACTION', [
+            'input' => $page
+        ]);
     }
 
     private function NotifyDriverSetupComplete(string $clientIP, int $clientPort): void
@@ -4137,28 +4258,72 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     /**
      * Manuelle Registrierung des Treibers bei Remote-Instanzen
      */
-    public function RegisterDriverManually(): void
+    public function RegisterDriverManually(): array
     {
+        // Refresh cached remote cores list first
         $this->RefreshRemoteCores();
-        $remotes = json_decode($this->ReadAttributeString('remote_cores'), true);
-        $token = $this->ReadAttributeString('token');
 
-        if (!is_array($remotes)) {
-            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, '❌ No remote instances found', 0);
-            return;
+        $remotes = json_decode($this->ReadAttributeString('remote_cores'), true);
+        if (!is_array($remotes) || empty($remotes)) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, '❌ No remote instances found (remote_cores empty)', 0);
+            return [
+                'ok' => false,
+                'error' => 'No remote instances found',
+                'results' => []
+            ];
         }
 
-        foreach ($remotes as $remote) {
-            $ip = $remote['host'];
-            $apiKey = $remote['api_key'];
+        // Ensure we have a token
+        $this->EnsureTokenInitialized();
+        $token = (string)$this->ReadAttributeString('token');
 
-            $hostValue = trim($this->ReadPropertyString('callback_IP'));
-            if ($hostValue === '') {
-                $hostValue = $ip; // Fallback: Remote IP
+        $hostValue = trim((string)$this->ReadPropertyString('callback_IP'));
+
+        $results = [];
+
+        foreach ($remotes as $remote) {
+            $ip = (string)($remote['host'] ?? '');
+            $apiKey = (string)($remote['api_key'] ?? '');
+
+            if ($ip === '') {
+                $results[] = [
+                    'ok' => false,
+                    'ip' => '',
+                    'url' => '',
+                    'status' => 0,
+                    'error' => 'Remote entry has no host',
+                    'response' => ''
+                ];
+                continue;
             }
 
-            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, "🔍 Registering driver on $ip (Symcon host: $hostValue)", 0);
-            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_AUTH, "📡 API key present=" . (!empty($apiKey) ? 'yes' : 'no') . " | token present=" . (!empty($token) ? 'yes' : 'no'), 0);
+            if ($hostValue === '') {
+                // Fallback: use Symcon callback host as the remote IP (works only if remote can reach Symcon via that IP)
+                $hostForRemote = $ip;
+            } else {
+                $hostForRemote = $hostValue;
+            }
+
+            $url = "http://{$ip}/api/intg/drivers";
+
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, "🔍 Registering driver on $ip (driver_url host: $hostForRemote)", 0);
+            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_AUTH,
+                '📡 API key present=' . (!empty($apiKey) ? 'yes' : 'no') . ' | token=' . (method_exists($this, 'MaskToken') ? $this->MaskToken($token) : (!empty($token) ? '***' : '(none)')),
+                0
+            );
+
+            if ($apiKey === '') {
+                $results[] = [
+                    'ok' => false,
+                    'ip' => $ip,
+                    'url' => $url,
+                    'status' => 0,
+                    'error' => 'Missing api_key for this remote core (Bearer token)',
+                    'response' => ''
+                ];
+                continue;
+            }
+
             $payload = [
                 'driver_id' => 'symcon-unfoldedcircle',
                 'name' => [
@@ -4169,10 +4334,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     'fr' => 'Pilote externe Symcon',
                     'es' => 'Controlador externo de Symcon'
                 ],
-                'driver_url' => 'ws://' . $hostValue . ':9988',
+                'driver_url' => 'ws://' . $hostForRemote . ':9988',
                 'token' => $token,
                 'auth_method' => 'HEADER',
-                'version' => '0.0.1',
+                'version' => '0.5.0',
                 'icon' => 'custom:symcon_icon.png',
                 'enabled' => true,
                 'description' => [
@@ -4188,27 +4353,79 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 'release_date' => '2025-05-19'
             ];
 
+            $jsonPayload = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
             $context = stream_context_create([
                 'http' => [
                     'method' => 'POST',
+                    'ignore_errors' => true, // allow reading body on non-2xx
                     'header' => [
                         'Content-Type: application/json',
                         'Accept: application/json',
                         'Authorization: Bearer ' . $apiKey
                     ],
-                    'content' => json_encode($payload)
+                    'content' => $jsonPayload,
+                    'timeout' => 8
                 ]
             ]);
 
-            $url = "http://{$ip}/api/intg/drivers";
             $response = @file_get_contents($url, false, $context);
 
+            // Determine HTTP status code (if available)
+            $status = 0;
+            if (isset($http_response_header) && is_array($http_response_header)) {
+                foreach ($http_response_header as $h) {
+                    if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
+                        $status = (int)$m[1];
+                        break;
+                    }
+                }
+            }
+
             if ($response === false) {
-                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, "❌ POST to $url failed", 0);
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, "❌ POST to $url failed (file_get_contents=false)", 0);
+                $results[] = [
+                    'ok' => false,
+                    'ip' => $ip,
+                    'url' => $url,
+                    'status' => $status,
+                    'error' => 'POST failed (no response body)',
+                    'response' => ''
+                ];
+                continue;
+            }
+
+            $ok = ($status >= 200 && $status < 300);
+            if ($ok) {
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, "✅ Driver registration succeeded on $ip (HTTP $status)", 0);
             } else {
-                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, "✅ Driver registration succeeded: $response", 0);
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, "⚠️ Driver registration returned HTTP $status on $ip", 0);
+            }
+
+            // Keep response as raw string; script can json_decode if needed
+            $results[] = [
+                'ok' => $ok,
+                'ip' => $ip,
+                'url' => $url,
+                'status' => $status,
+                'error' => $ok ? '' : 'Non-2xx response',
+                'response' => (string)$response
+            ];
+        }
+
+        $allOk = true;
+        foreach ($results as $r) {
+            if (empty($r['ok'])) {
+                $allOk = false;
+                break;
             }
         }
+
+        return [
+            'ok' => $allOk,
+            'count' => count($results),
+            'results' => $results
+        ];
     }
 
     /**
@@ -6382,6 +6599,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     public const TOPIC_API = 'API';
     public const TOPIC_FORM = 'FORM';
     public const TOPIC_EXT = 'EXT';
+    // Debug topics
+    const TOPIC_SETUP = 'SETUP';
+
+    public const TOPIC_CMD = 'CMD';
 
     /**
      * Structured debug output with topic/level filtering and throttling.
@@ -6481,13 +6702,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             self::TOPIC_AUTH => 'Authentication / token / whitelist',
             self::TOPIC_HOOK => 'Webhook requests / responses',
             self::TOPIC_WS => 'WebSocket frames / low-level',
+            self::TOPIC_DEVICE => 'Device',
             self::TOPIC_IO => 'Socket I/O / transport details',
             self::TOPIC_ENTITY => 'Entity updates sent to Remote 3',
             self::TOPIC_VM => 'Variable/MessageSink processing',
             self::TOPIC_DISCOVERY => 'Discovery / device mapping helpers',
             self::TOPIC_API => 'Remote API calls',
             self::TOPIC_FORM => 'Form/UI helpers / sessions list',
-            self::TOPIC_EXT => 'Extended / verbose debug'
+            self::TOPIC_EXT => 'Extended / verbose debug',
+            self::TOPIC_SETUP => 'Driver setup flow (setup_driver / driver_setup_change / set_driver_user_data)',
+            self::TOPIC_CMD => 'Incoming commands + responses (entity_command, action calls, result)',
         ];
     }
 
