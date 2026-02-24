@@ -609,9 +609,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     case 'sensor':
                         $varId = $entry['var_id'] ?? null;
                         if (is_numeric($varId) && @IPS_VariableExists($varId)) {
-                            $result = $this->GetSensorValueAndUnit($varId);
-                            $attributes['value'] = $result['value'];
-                            $attributes['unit'] = $result['unit'];
+                            //$result = $this->GetSensorValueAndUnit($varId);
+                            $attributes['value'] = GetValueFormatted($varId);
+                            // $attributes['unit'] = $result['unit'];
                             $attributes['state'] = 'ON';
                             $this->SendEntityChange('sensor_' . $entry['instance_id'], 'sensor', $attributes);
                         }
