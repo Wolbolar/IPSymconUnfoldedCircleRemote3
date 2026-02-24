@@ -1,6 +1,10 @@
 <?php
 
 declare(strict_types=1);
+
+require_once __DIR__ . '/../libs/DnssdRemoteDiscoveryTrait.php';
+require_once __DIR__ . '/../libs/DebugTrait.php';
+require_once __DIR__ . '/../libs/UcrApiHelper.php';
 require_once __DIR__ . '/../libs/WebSocketUtils.php';
 require_once __DIR__ . '/../libs/Entity_Button.php';
 require_once __DIR__ . '/../libs/Entity_Climate.php';
@@ -20,6 +24,8 @@ use WebsocketHandler\WebSocketUtils;
 class Remote3IntegrationDriver extends IPSModuleStrict
 {
     use ClientSessionTrait;
+    use DebugTrait;
+    use DnssdRemoteDiscoveryTrait;
 
     const DEFAULT_WS_PORT = 9988;
 
@@ -30,6 +36,31 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     const Unfolded_Circle_API_Version = "0.12.1";
 
     const Unfolded_Circle_API_Minimum_Version = "0.12.1";
+
+    private ?UcrApiHelper $apiHelper = null;
+
+    private function Api(): UcrApiHelper
+    {
+        if ($this->apiHelper === null) {
+            $this->apiHelper = new UcrApiHelper($this);
+        }
+        return $this->apiHelper;
+    }
+
+    public function GetApiKey(): string
+    {
+        return $this->Api()->GetApiKey();
+    }
+
+    public function ResetApiKey(): bool
+    {
+        return $this->Api()->ResetApiKey();
+    }
+
+    public function UploadSymconIcon(): string
+    {
+        return $this->Api()->UploadSymconIcon();
+    }
 
     public function GetCompatibleParents(): string
     {
@@ -43,6 +74,17 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     {
         //Never delete this line!
         parent::Create();
+
+        $this->RegisterAttributeString('api_key', '');
+        $this->RegisterAttributeString('api_key_name', '');
+        $this->RegisterAttributeString('auth_mode', '');
+        $this->RegisterAttributeString('symcon_uuid', '');
+        $this->RegisterAttributeBoolean('icon_uploaded', false);
+        $this->RegisterPropertyString('web_config_user', 'web-configurator');
+        // REST configuration used by UcrApiHelper
+        $this->RegisterPropertyString('host', '');
+        $this->RegisterAttributeString('web_config_pass', '');
+        $this->RegisterAttributeString('remote_host', '');
 
         $this->RegisterAttributeString('token', '');
 
@@ -120,6 +162,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         // $this->RequireParent('{8062CF2B-600E-41D6-AD4B-1BA66C32D6ED}');
         $this->RegisterTimer("PingDeviceState", 0, 'UCR_PingDeviceState($_IPS[\'TARGET\']);');
+        $this->RegisterAttributeString('remote_directory', '[]');
+        $this->RegisterTimer('RefreshRemoteDirectory', 0, 'UCR_RefreshRemoteDirectory($_IPS["TARGET"]);');
 
         $this->RegisterTimer('UpdateAllEntityStates', 0, 'UCR_UpdateAllEntityStates($_IPS["TARGET"]);');
 
@@ -144,6 +188,12 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->RegisterMdnsService();
             $this->SetTimerInterval("PingDeviceState", 30000); // alle 30 Sekunden den Status senden
             $this->SetTimerInterval("UpdateAllEntityStates", 15000); // alle 15 Sekunden den Status senden
+            $this->SetTimerInterval('RefreshRemoteDirectory', 60000);
+            // Unfiltered debug to verify timer setup (visible even when DebugTrait filters are active)
+            $this->SendDebug(__FUNCTION__, '✅ RefreshRemoteDirectory timer interval set to 60000 ms', 0);
+
+            // Run once immediately so users see results without waiting for the first timer tick
+            $this->RefreshRemoteDirectory();
             $this->EnsureTokenInitialized();
         }
         // Register for variable updates for all mapped entities (switches, sensors, lights, covers, climate, media)
@@ -155,6 +205,138 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->RegisterMessage($parentID, IM_CHANGESTATUS);
         }
     }
+
+    public function RefreshRemoteDirectory(): void
+    {
+        // Unfiltered debug: helps verifying that the method is actually executed
+        $this->SendDebug(__FUNCTION__, '🔎 RefreshRemoteDirectory() called', 0);
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_EXT, '🔎 Refresh remote directory (mDNS)', 0);
+
+        $devices = $this->SearchRemotes();          // aus Trait
+        $info = $this->GetRemoteInfo($devices);  // aus Trait
+
+        // Speichern als Referenzliste
+        $this->WriteAttributeString('remote_directory', json_encode(array_values($info)));
+        $this->SendDebug(__FUNCTION__, '✅ remote_directory written (entries=' . count($info) . ')', 0);
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '✅ remote_directory updated: ' . count($info) . ' remote(s)', 0);
+    }
+
+    /**
+     * Returns true if given string is a valid IPv6 address.
+     */
+    private function IsIPv6(string $ip): bool
+    {
+        $ip = trim($ip);
+        if ($ip === '') {
+            return false;
+        }
+        // Strip IPv6 zone id (e.g. fe80::1%eth0)
+        $ipNoZone = explode('%', $ip, 2)[0];
+        return filter_var($ipNoZone, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+    }
+
+    /**
+     * Returns true if the IP is IPv6 link-local (fe80::/10). Zone ids like "%8" are supported.
+     */
+    private function IsIPv6LinkLocal(string $ip): bool
+    {
+        $ip = trim($ip);
+        if ($ip === '') {
+            return false;
+        }
+        $ipNoZone = strtolower(explode('%', $ip, 2)[0]);
+        // Basic check for fe80::/10 (we treat any fe80: as link-local for our purposes)
+        return str_starts_with($ipNoZone, 'fe80:') || str_starts_with($ipNoZone, 'fe80::');
+    }
+
+    /**
+     * Try to resolve an IPv4 address for a given IPv6 address using the remote_directory attribute.
+     * Returns empty string if no match is found.
+     */
+    private function LookupIPv4ForIPv6(string $ipv6): string
+    {
+        $ipv6 = trim($ipv6);
+        if ($ipv6 === '') {
+            return '';
+        }
+        $ipv6NoZone = strtolower(explode('%', $ipv6, 2)[0]);
+
+        $dirRaw = (string)$this->ReadAttributeString('remote_directory');
+        $dir = json_decode($dirRaw, true);
+        if (!is_array($dir)) {
+            return '';
+        }
+
+        // If we only have a link-local IPv6 (fe80::) it often differs from the mDNS-advertised global/ULA IPv6.
+        // In a single-remote setup we can safely fall back to that remote's IPv4.
+        $ipv6IsLinkLocal = $this->IsIPv6LinkLocal($ipv6);
+        if ($ipv6IsLinkLocal && count($dir) === 1) {
+            $only = $dir[0];
+            if (is_array($only)) {
+                $only4 = trim((string)($only['host_ipv4'] ?? $only['hostIPv4'] ?? $only['ipv4'] ?? ''));
+                if ($only4 !== '') {
+                    return $only4;
+                }
+            }
+        }
+
+        foreach ($dir as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $e6 = (string)($entry['host_ipv6'] ?? $entry['hostIPv6'] ?? $entry['ipv6'] ?? '');
+            $e4 = (string)($entry['host_ipv4'] ?? $entry['hostIPv4'] ?? $entry['ipv4'] ?? '');
+            if ($e6 === '' || $e4 === '') {
+                continue;
+            }
+            $e6NoZone = strtolower(explode('%', $e6, 2)[0]);
+            if ($e6NoZone === $ipv6NoZone) {
+                return $e4;
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Resolve the best host to use for REST calls.
+     * If the client connected via IPv6 and we have a matching IPv4 in remote_directory, return that IPv4.
+     * Otherwise return the original client IP.
+     */
+    private function ResolveRemoteHostForRest(string $clientIP): string
+    {
+        $clientIP = trim($clientIP);
+        if ($clientIP === '') {
+            return '';
+        }
+
+        if ($this->IsIPv6($clientIP)) {
+            $ipv4 = $this->LookupIPv4ForIPv6($clientIP);
+            if ($ipv4 !== '') {
+                return $ipv4;
+            }
+
+            // As a last resort, avoid using link-local IPv6 for REST calls.
+            // If we cannot resolve IPv4, return empty so callers can decide what to do.
+            if ($this->IsIPv6LinkLocal($clientIP)) {
+                return '';
+            }
+        }
+
+        return $clientIP;
+    }
+
+    public function GetStoredWebPassword(): string
+    {
+        return (string)$this->ReadAttributeString('remote_web_pin');
+    }
+
+    public function GetStoredApiKey(): string
+    {
+        return (string)$this->ReadAttributeString('api_key');
+    }
+
 
     private function GetModuleLibraryVersion(): string
     {
@@ -747,6 +929,24 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $clientPort = (int)($data['ClientPort'] ?? $data['ClientPORT'] ?? 0);
         $type = (int)($data['Type'] ?? -1);
 
+        // --- REST host resolution (IPv6 -> IPv4 fallback via mDNS directory) ---
+        $clientIPRest = $this->ResolveRemoteHostForRest($clientIP);
+        if ($clientIPRest !== '' && $clientIPRest !== $clientIP) {
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT,
+                '🌐 REST host resolved: client_ip=' . $clientIP . ' → rest_host=' . $clientIPRest, 0);
+        }
+
+        // Keep a best-effort REST host available for later REST calls (used during setup flow)
+        // Overwrite remote_host if it is empty or contains a link-local IPv6 (unusable for REST).
+        $storedRemoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+        $storedIsBad = ($storedRemoteHost !== '' && $this->IsIPv6LinkLocal($storedRemoteHost));
+        if (($storedRemoteHost === '' || $storedIsBad) && $clientIPRest !== '') {
+            if ($storedIsBad) {
+                $this->SendDebug(__FUNCTION__, '🔁 remote_host was link-local IPv6, replacing with REST host: ' . $clientIPRest, 0);
+            }
+            $this->WriteAttributeString('remote_host', $clientIPRest);
+        }
+
         if (!isset($data['Buffer'])) {
             $this->Debug(__FUNCTION__, self::LV_ERROR, self::TOPIC_WS, '❌ Missing Buffer in incoming data.', 0);
             $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_WS, '📥 Incoming object: ' . json_encode($data), 0);
@@ -922,6 +1122,12 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             case 'setup_driver':
                 $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🛠️ setup_driver received → starting interactive setup flow', 0);
                 $this->SendResultOK($reqId, $clientIP, $clientPort);
+                // Remember which Remote connected (needed for REST calls without Discovery/Core Manager)
+                // Use IPv4 fallback for REST if the remote connected via IPv6 and we have a matching IPv4 from mDNS.
+                $restHost = $this->ResolveRemoteHostForRest($clientIP);
+                if ($restHost !== '') {
+                    $this->WriteAttributeString('remote_host', $restHost);
+                }
                 $this->StartDriverSetupFlow($clientIP, $clientPort);
                 break;
 
@@ -1205,6 +1411,74 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
     }
 
+    private function GetPrimaryMacAddress(): string
+    {
+        $nics = @Sys_GetNetworkInfo();
+        if (!is_array($nics)) {
+            return '';
+        }
+
+        $candidates = [];
+
+        foreach ($nics as $nic) {
+            $desc = strtolower((string)($nic['Description'] ?? ''));
+            $mac = strtoupper(trim((string)($nic['MAC'] ?? '')));
+            $ip = trim((string)($nic['IP'] ?? ''));
+
+            if ($mac === '' || $ip === '' || $ip === '127.0.0.1') {
+                continue;
+            }
+
+            // Filter obvious virtual adapters
+            $virtualHints = ['vmware', 'virtual', 'hyper-v', 'vbox', 'loopback', 'tap', 'tunnel', 'pseudo'];
+            $isVirtual = false;
+            foreach ($virtualHints as $h) {
+                if (strpos($desc, $h) !== false) {
+                    $isVirtual = true;
+                    break;
+                }
+            }
+            if ($isVirtual) {
+                continue;
+            }
+
+            $idx = (int)($nic['InterfaceIndex'] ?? 999999);
+            $candidates[] = ['idx' => $idx, 'mac' => $mac, 'ip' => $ip, 'desc' => $desc];
+        }
+
+        if (empty($candidates)) {
+            // fallback: take first NIC with a MAC (even if virtual)
+            foreach ($nics as $nic) {
+                $mac = strtoupper(trim((string)($nic['MAC'] ?? '')));
+                if ($mac !== '') {
+                    return $mac;
+                }
+            }
+            return '';
+        }
+
+        // deterministic: lowest InterfaceIndex wins
+        usort($candidates, fn($a, $b) => $a['idx'] <=> $b['idx']);
+        return $candidates[0]['mac'];
+    }
+
+    private function GetStableSystemId(): string
+    {
+        $licensee = strtolower(trim((string)@IPS_GetLicensee()));
+        $instanceId = (string)$this->InstanceID;
+
+        // Deterministic seed per Symcon installation + Integration Driver instance
+        $seed = $licensee . '|' . $instanceId;
+
+        // Privacy-friendly stable id
+        return substr(hash('sha256', $seed), 0, 16);
+    }
+
+    public function GetDriverId(): string
+    {
+        return 'uc.symcon.' . $this->GetStableSystemId() . '.main';
+    }
+
     private function SendDriverMetadata(string $clientIP, int $clientPort, int $reqId): void
     {
         $first = $this->GetSymconFirstName();
@@ -1230,8 +1504,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'code' => 200,
             'msg' => 'driver_metadata',
             'msg_data' => [
-                'driver_id' => 'uc_symcon_driver',
-                'auth_method' => "HEADER",
+                'driver_id' => $this->GetDriverId(),
+                'auth_method' => "MESSAGE",
                 'version' => $this->GetModuleLibraryVersion(),
                 'min_core_api' => self::Unfolded_Circle_API_Minimum_Version,
                 'name' => [
@@ -1304,6 +1578,74 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         // Parse input values
         $inputValues = $json['msg_data']['input_values'] ?? [];
+        if (isset($inputValues['pin'])) {
+            $pin = trim((string)$inputValues['pin']);
+
+            // DEBUG: Log received PIN from Remote
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔐 Received PIN from Remote: "' . $pin . '" (len=' . strlen($pin) . ')', 0);
+            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_SETUP, '🔐 Raw input_values: ' . json_encode($inputValues), 0);
+
+            if ($pin === '') {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '⚠️ No PIN provided → requesting PIN again', 0);
+                $this->StartDriverSetupFlow($clientIP, $clientPort);
+                return;
+            }
+
+            // Store PIN locally (attribute) and configure properties for UcrApiHelper
+            $this->WriteAttributeString('web_config_pass', $pin);
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '💾 Stored Remote PIN in attribute web_config_pass', 0);
+
+            // Determine remote host (fallback to client IP via REST resolver)
+            $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+            if ($remoteHost === '') {
+                $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
+                if ($remoteHost !== '') {
+                    $this->WriteAttributeString('remote_host', $remoteHost);
+                }
+            }
+
+            // Use shared helper to validate/create API key
+            // ... nachdem PIN gespeichert wurde:
+
+            $apiKey = trim((string)$this->GetApiKey());
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔎 GetApiKey() returned: "' . $apiKey . '"', 0);
+
+            if ($apiKey === '') {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '❌ UcrApiHelper failed to obtain API key → requesting PIN again', 0);
+                // PIN Seite erneut anzeigen
+                $this->SendResultOK($reqId, $clientIP, $clientPort);
+                $this->StartDriverSetupFlow($clientIP, $clientPort);
+                return;
+            }
+
+            // ✅ API-Key vorhanden -> Token automatisch setzen
+            $tokenStored = trim((string)$this->ReadAttributeString('token'));
+            $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+            if ($remoteHost === '') {
+                $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
+                if ($remoteHost !== '') {
+                    $this->WriteAttributeString('remote_host', $remoteHost);
+                }
+            }
+
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔑 API key OK → registering external token on Remote', 0);
+            $reg = $this->RemoteUpdateIntegrationDriverToken($remoteHost, $apiKey, $tokenStored);
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '📌 RemoteUpdateIntegrationDriverToken result: ' . json_encode($reg), 0);
+
+            // Immer ACK schicken, sonst wartet die Remote ggf.
+            $this->SendResultOK($reqId, $clientIP, $clientPort);
+
+            if (($reg['ok'] ?? false) === true) {
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ External token registered → finishing setup', 0);
+                $this->FinishDriverSetupOK($clientIP, $clientPort);
+                return;
+            }
+
+            // Token setzen fehlgeschlagen -> Flow neu starten (zeigt Status/Fehler-Seite aus StartDriverSetupFlow)
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '❌ External token registration failed → restarting setup flow', 0);
+            $this->StartDriverSetupFlow($clientIP, $clientPort);
+            return;
+        }
         $tokenUser = (string)($inputValues['token'] ?? '');
         $tokenStored = (string)$this->ReadAttributeString('token');
 
@@ -1326,8 +1668,23 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             return;
         }
 
-        // Token accepted. Finish setup so the remote creates the integration instance.
-        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token accepted → finishing setup', 0);
+        // Token accepted. Try to push/register the token to the Remote via REST so the Remote marks it as configured.
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token accepted → attempting REST registration with token', 0);
+
+        $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+        if ($remoteHost === '') {
+            $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
+            if ($remoteHost !== '') {
+                $this->WriteAttributeString('remote_host', $remoteHost);
+            }
+        }
+
+        $apiKey = trim((string)$this->GetApiKey());
+        $reg = $this->RemoteUpdateIntegrationDriverToken($remoteHost, $apiKey, $tokenStored);
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '📌 RemoteUpdateIntegrationDriverToken result: ' . json_encode($reg), 0);
+
+        // Finish setup so the remote creates/updates the integration instance.
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Finishing setup (STOP/OK)', 0);
         $this->FinishDriverSetupOK($clientIP, $clientPort);
     }
 
@@ -1941,6 +2298,213 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
     }
 
+    private function EnsureRemoteApiAccess(string $remoteHost): array
+    {
+        $remoteHost = trim($remoteHost);
+        if ($remoteHost === '') {
+            return ['ok' => false, 'api_key' => '', 'need_pin' => true, 'reason' => 'remote_host_empty'];
+        }
+
+        // PIN wird im Setup als Attribute gespeichert
+        $storedPin = trim((string)$this->ReadAttributeString('web_config_pass'));
+
+        // UcrApiHelper erwartet: host, web_config_user, web_config_pass
+        $this->WriteAttributeString('remote_host', $remoteHost);
+
+        // Jetzt via Helper versuchen, einen gültigen API Key zu bekommen (validieren/erneuern/neu erstellen)
+        $apiKey = trim((string)$this->GetApiKey());
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔎 EnsureRemoteApiAccess → GetApiKey(): "' . $apiKey . '" for host ' . $remoteHost, 0);
+
+        if ($apiKey !== '') {
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Remote API access OK (api_key_ok)', 0);
+            return ['ok' => true, 'api_key' => $apiKey, 'need_pin' => false, 'reason' => 'api_key_ok'];
+        }
+
+        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '❌ Remote API access failed → PIN required', 0);
+
+        // Kein API Key => PIN notwendig (entweder fehlt oder ist falsch/outdated)
+        if ($storedPin !== '') {
+            return ['ok' => false, 'api_key' => '', 'need_pin' => true, 'reason' => 'stored_pin_no_key'];
+        }
+        return ['ok' => false, 'api_key' => '', 'need_pin' => true, 'reason' => 'no_pin'];
+    }
+
+    /**
+     * Update the integration driver configuration on the Remote via the Core REST API.
+     *
+     * We use this to set the Symcon access token for the external driver entry.
+     *
+     * Endpoint:
+     *   PATCH /api/intg/drivers/{driverId}
+     *
+     * Body model: integrationDriverUpdate (token + auth_method).
+     *
+     * NOTE: This replaces the deprecated/unsupported `/api/auth/external/...` approach, which
+     * only applies to installed integrations and may return 404 for external drivers.
+     */
+    public function RemoteUpdateIntegrationDriverToken(string $remoteHost, string $apiKey, string $token): array
+    {
+        $remoteHost = trim($remoteHost);
+        $apiKey = trim($apiKey);
+        $token = trim($token);
+
+        if ($remoteHost === '' || $apiKey === '' || $token === '') {
+            return [
+                'ok' => false,
+                'reason' => 'missing_remoteHost_apiKey_or_token',
+                'remoteHost' => $remoteHost,
+                'apiKey_len' => strlen($apiKey),
+                'token_len' => strlen($token)
+            ];
+        }
+
+        // The driver id must match the integration driver's driver_id.
+        $driverId = (string)$this->GetDriverId();
+
+        // PATCH model: integrationDriverUpdate
+        // - token: authentication token for the driver
+        // - auth_method: MESSAGE (token is sent with an auth message after WS connection)
+        //   HEADER would mean `auth-token` header during WS upgrade.
+        $bodyArr = [
+            'token' => $token,
+            'auth_method' => 'MESSAGE'
+        ];
+
+        $body = json_encode($bodyArr, JSON_UNESCAPED_SLASHES);
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔑 Updating driver token via REST: PATCH /api/intg/drivers/' . $driverId, 0);
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_SETUP, '🔑 Driver token update body: ' . (string)$body, 0);
+
+        $url = "http://{$remoteHost}/api/intg/drivers/" . rawurlencode($driverId);
+
+        $ch = curl_init($url);
+        $opts = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CUSTOMREQUEST => 'PATCH',
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $apiKey
+            ],
+            CURLOPT_POSTFIELDS => ($body === false ? '{}' : $body)
+        ];
+
+        curl_setopt_array($ch, $opts);
+        $resp = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = (string)curl_error($ch);
+        curl_close($ch);
+
+        $result = [
+            'httpCode' => $code,
+            'response' => ($resp === false ? '' : (string)$resp),
+            'error' => $err
+        ];
+
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_SETUP, '🔑 PATCH result: ' . json_encode($result), 0);
+
+        if ($err !== '') {
+            return ['ok' => false, 'reason' => 'curl_error', 'error' => $err];
+        }
+
+        if ($code >= 200 && $code < 300) {
+            return ['ok' => true, 'reason' => 'updated', 'httpCode' => $code, 'response' => $result['response']];
+        }
+
+        if ($code === 404) {
+            return [
+                'ok' => false,
+                'reason' => 'driver_not_found_404',
+                'hint' => 'Remote does not have an external driver entry for this driver_id yet. Ensure the driver is registered/visible in the Remote before updating its token (driver_id must match).',
+                'httpCode' => $code,
+                'response' => $result['response']
+            ];
+        }
+
+        return ['ok' => false, 'reason' => 'patch_failed', 'httpCode' => $code, 'response' => $result['response']];
+    }
+
+    /**
+     * Reads the current integration driver configuration from the Remote via REST.
+     * Used to check whether a token is already set.
+     */
+    public function RemoteGetIntegrationDriver(string $remoteHost, string $apiKey): array
+    {
+        $remoteHost = trim($remoteHost);
+        $apiKey = trim($apiKey);
+
+        if ($remoteHost === '' || $apiKey === '') {
+            return [
+                'ok' => false,
+                'reason' => 'missing_remoteHost_or_apiKey'
+            ];
+        }
+
+        $driverId = (string)$this->GetDriverId();
+        $url = "http://{$remoteHost}/api/intg/drivers/" . rawurlencode($driverId);
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔎 Reading driver config via REST: GET /api/intg/drivers/' . $driverId, 0);
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CUSTOMREQUEST => 'GET',
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_HTTPHEADER => [
+                'Accept: application/json',
+                'Authorization: Bearer ' . $apiKey
+            ]
+        ]);
+
+        $resp = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $err = (string)curl_error($ch);
+        curl_close($ch);
+
+        if ($err !== '') {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '❌ GET driver config curl error: ' . $err, 0);
+            return ['ok' => false, 'reason' => 'curl_error', 'error' => $err];
+        }
+
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_SETUP, '🔎 GET driver config HTTP ' . $code . ' → ' . (string)$resp, 0);
+
+        if ($code < 200 || $code >= 300) {
+            return [
+                'ok' => false,
+                'reason' => 'http_error',
+                'httpCode' => $code,
+                'response' => $resp
+            ];
+        }
+
+        $data = json_decode((string)$resp, true);
+        if (!is_array($data)) {
+            return [
+                'ok' => false,
+                'reason' => 'invalid_json',
+                'response' => $resp
+            ];
+        }
+
+        $token = $data['token'] ?? '';
+        $authMethod = $data['auth_method'] ?? '';
+
+        $this->Debug(
+            __FUNCTION__,
+            self::LV_INFO,
+            self::TOPIC_SETUP,
+            '🔐 Remote driver token read → token_len=' . strlen((string)$token) . ', auth_method=' . (string)$authMethod,
+            0
+        );
+
+        return [
+            'ok' => true,
+            'token' => (string)$token,
+            'auth_method' => (string)$authMethod,
+            'raw' => $data
+        ];
+    }
+
     /**
      * Start the driver setup flow by requesting a token from the user.
      * According to the UC integration asyncapi, after confirming `setup_driver`, the driver must emit
@@ -1948,54 +2512,124 @@ class Remote3IntegrationDriver extends IPSModuleStrict
      */
     private function StartDriverSetupFlow(string $clientIP, int $clientPort): void
     {
-        // Ensure we have a token on first setup, but never overwrite an existing one.
         $this->EnsureTokenInitialized();
         $token = (string)$this->ReadAttributeString('token');
 
-        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '➡️ Requesting user token input (prefilled) via driver_setup_change WAIT_USER_ACTION', 0);
+        $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+        if ($remoteHost === '') {
+            $remoteHost = trim($clientIP);
+            if ($remoteHost !== '') {
+                $this->WriteAttributeString('remote_host', $remoteHost);
+            }
+        }
 
-        // Ask the remote UI to show a token input page. Prefill with current token so the user can simply click Next.
-        // NOTE: Full background/automatic token provisioning is not supported by the setup flow spec itself;
-        // driver registration via REST would be the fully automatic alternative.
-        $page = [
-            'title' => [
-                'en' => 'Access Token',
-                'de' => 'Zugriffs-Token'
-            ],
-            'settings' => [
-                [
-                    'id' => 'token',
-                    'label' => [
-                        'en' => 'Token for Symcon remote access',
-                        'de' => 'Token für den Remote-Zugriff auf Symcon'
-                    ],
-                    'field' => [
-                        'text' => [
-                            'value' => $token
-                        ]
-                    ]
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '➡️ Starting setup flow (standalone) – ensuring Remote API access first', 0);
+
+        $apiAccess = $this->EnsureRemoteApiAccess($remoteHost);
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '📊 EnsureRemoteApiAccess result: ' . json_encode($apiAccess), 0);
+
+        if (!($apiAccess['ok'] ?? false)) {
+
+            $storedPin = trim((string)$this->ReadAttributeString('web_config_pass'));
+
+            $pinInfoTextEn =
+                "To configure this integration automatically, Symcon needs permission to call the Remote's REST API.\n\n" .
+                "Please enter the 4-digit PIN from the Remote's Web Configurator. Symcon stores the PIN locally and uses it only to request an API key from the Remote.\n\n" .
+                "You normally need to enter the PIN only once.";
+
+            $pinInfoTextDe =
+                "Damit diese Integration möglichst automatisch eingerichtet werden kann, muss Symcon die REST-API der Remote aufrufen dürfen.\n\n" .
+                "Bitte gib den 4-stelligen PIN aus dem Web-Configurator der Remote ein. Symcon speichert den PIN lokal und nutzt ihn ausschließlich, um bei der Remote einen API-Key zu erzeugen.\n\n" .
+                "In der Regel musst Du den PIN nur einmal eingeben.";
+
+            if ($storedPin !== '') {
+                $pinInfoTextEn .= "\n\nA PIN is already stored, but Symcon could not obtain a working API key. Please confirm the PIN or enter the current one.";
+                $pinInfoTextDe .= "\n\nEin PIN ist bereits gespeichert, aber Symcon konnte keinen funktionierenden API-Key erhalten. Bitte bestätige den PIN oder gib den aktuellen ein.";
+            }
+
+            $page = [
+                'title' => [
+                    'en' => 'Remote PIN',
+                    'de' => 'Remote PIN'
                 ],
-                [
-                    'id' => 'hint',
-                    'label' => [
-                        'en' => 'Tip',
-                        'de' => 'Hinweis'
-                    ],
-                    'field' => [
+                'settings' => [
+                    [
+                        'id' => 'pin_info',
                         'label' => [
-                            'value' => [
-                                'en' => 'If the field is prefilled, just press Next. The Remote will store the token and use it for future connections.',
-                                'de' => 'Wenn das Feld bereits ausgefüllt ist, einfach auf Weiter klicken. Die Remote speichert den Token und nutzt ihn für zukünftige Verbindungen.'
+                            'en' => 'Why do we need this?',
+                            'de' => 'Warum wird das benötigt?'
+                        ],
+                        'field' => [
+                            'label' => [
+                                'value' => [
+                                    'en' => $pinInfoTextEn,
+                                    'de' => $pinInfoTextDe
+                                ]
+                            ]
+                        ]
+                    ],
+                    [
+                        'id' => 'pin',
+                        'label' => [
+                            'en' => '4-digit Remote PIN',
+                            'de' => '4-stelliger Remote PIN'
+                        ],
+                        'field' => [
+                            'text' => [
+                                // Prefill falls vorhanden
+                                'value' => $storedPin
                             ]
                         ]
                     ]
                 ]
-            ]
-        ];
+            ];
 
-        $this->SendDriverSetupChange($clientIP, $clientPort, 'SETUP', 'WAIT_USER_ACTION', [
-            'input' => $page
-        ]);
+            $this->SendDriverSetupChange($clientIP, $clientPort, 'SETUP', 'WAIT_USER_ACTION', [
+                'input' => $page
+            ]);
+
+            return;
+        }
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '➡️ Remote API access OK → pushing Symcon token to Remote via REST (no user input)', 0);
+        // Keep setup alive (watchdog) while we perform REST calls.
+        $this->SendDriverSetupChange($clientIP, $clientPort, 'SETUP', 'SETUP');
+
+        $apiKey = trim((string)($apiAccess['api_key'] ?? ''));
+        $tokenStored = trim((string)$this->ReadAttributeString('token'));
+
+        // 1) Zuerst aktuellen Driver-Status vom Remote lesen
+        $driverInfo = $this->RemoteGetIntegrationDriver($remoteHost, $apiKey);
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '📌 RemoteGetIntegrationDriver result: ' . json_encode($driverInfo), 0);
+
+        if (($driverInfo['ok'] ?? false) === true) {
+
+            $remoteToken = (string)($driverInfo['token'] ?? '');
+
+            // a) Token ist bereits korrekt gesetzt → Setup beenden (Remote erstellt danach die Instanz)
+            if ($remoteToken !== '' && $remoteToken === $tokenStored) {
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Remote already has correct token → finishing setup (STOP/OK)', 0);
+                $this->FinishDriverSetupOK($clientIP, $clientPort);
+                return;
+            }
+
+            // b) Token fehlt oder ist anders → jetzt PATCH ausführen
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔄 Remote token missing or different → updating token via PATCH', 0);
+        } else {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_SETUP, '⚠️ Could not read driver info → attempting PATCH anyway', 0);
+        }
+
+        // 2) Token setzen/aktualisieren
+        $reg = $this->RemoteUpdateIntegrationDriverToken($remoteHost, $apiKey, $tokenStored);
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '📌 RemoteUpdateIntegrationDriverToken result: ' . json_encode($reg), 0);
+
+        if (($reg['ok'] ?? false) === true) {
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token successfully registered/updated on Remote → finishing setup (STOP/OK)', 0);
+            // According to AsyncAPI, the setup process is finished with event_type STOP + state OK.
+            // After this, the Remote creates the integration instance and proceeds with entity handling.
+            $this->FinishDriverSetupOK($clientIP, $clientPort);
+            return;
+        }
     }
 
     /**
@@ -2133,7 +2767,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 'version' => [
                     'api' => self::Unfolded_Circle_API_Version,
                     'driver' => $this->GetModuleLibraryVersion()
-                ]
+                ],
+                'driver_id' => $this->GetDriverId()
             ]
         ];
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
@@ -2394,56 +3029,6 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, 'ℹ️ Symcon icon not found on Remote 3', 0);
         return false;
-    }
-
-    /**
-     * Lädt das Symcon-Icon zu Remote 3 hoch.
-     *
-     * @param string $apiKey
-     * @param string $ip
-     */
-    private function UploadSymconIcon(string $apiKey, string $ip): void
-    {
-        $iconPath = __DIR__ . '/../libs/symcon_icon.png';
-
-        if (!file_exists($iconPath)) {
-            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, "❌ Icon-Datei nicht gefunden: $iconPath", 0);
-            return;
-        }
-
-        $boundary = uniqid();
-        $delimiter = '-------------' . $boundary;
-
-        $fileContents = file_get_contents($iconPath);
-        $filename = basename($iconPath);
-
-        $data = "--$delimiter\r\n";
-        $data .= "Content-Disposition: form-data; name=\"file\"; filename=\"$filename\"\r\n";
-        $data .= "Content-Type: image/png\r\n\r\n";
-        $data .= $fileContents . "\r\n";
-        $data .= "--$delimiter--\r\n";
-
-        $options = [
-            'http' => [
-                'method' => 'POST',
-                'header' => [
-                    "Content-Type: multipart/form-data; boundary=$delimiter",
-                    'Accept: application/json',
-                    "Authorization: $apiKey"
-                ],
-                'content' => $data
-            ]
-        ];
-
-        $context = stream_context_create($options);
-        $url = "http://{$ip}/api/resources/Icon";
-        $response = @file_get_contents($url, false, $context);
-
-        if ($response === false) {
-            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, '❌ Fehler beim Hochladen des Icons', 0);
-        } else {
-            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '✅ Icon erfolgreich hochgeladen: ' . $response, 0);
-        }
     }
 
     /**
@@ -4277,7 +4862,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->EnsureTokenInitialized();
         $token = (string)$this->ReadAttributeString('token');
 
+        // Determine Symcon host IP for driver_url
         $hostValue = trim((string)$this->ReadPropertyString('callback_IP'));
+        $hostAuto = $this->GetHostIP();
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '🧭 Host selection (callback_IP vs auto) = ' . json_encode([
+                'callback_IP' => $hostValue,
+                'auto' => $hostAuto
+            ], JSON_UNESCAPED_SLASHES), 0);
 
         $results = [];
 
@@ -4297,16 +4889,35 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 continue;
             }
 
-            if ($hostValue === '') {
-                // Fallback: use Symcon callback host as the remote IP (works only if remote can reach Symcon via that IP)
-                $hostForRemote = $ip;
-            } else {
-                $hostForRemote = $hostValue;
+            // Prefer explicit callback_IP; otherwise use Symcon host IP detected via Sys_GetNetworkInfo
+            $hostForRemote = ($hostValue !== '') ? $hostValue : $hostAuto;
+
+            // If still empty, do not proceed
+            if ($hostForRemote === '') {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_EXT, '❌ Cannot determine host IP for driver_url (callback_IP empty and auto-detect failed)', 0);
+                $results[] = [
+                    'ok' => false,
+                    'ip' => $ip,
+                    'url' => '',
+                    'status' => 0,
+                    'error' => 'Cannot determine host IP for driver_url',
+                    'response' => ''
+                ];
+                continue;
             }
 
+            $driverUrl = 'ws://' . $hostForRemote . ':9988';
             $url = "http://{$ip}/api/intg/drivers";
 
-            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, "🔍 Registering driver on $ip (driver_url host: $hostForRemote)", 0);
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, "🔍 Registering driver on remote=$ip | driver_url=$driverUrl", 0);
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '🧭 Host decision = ' . json_encode([
+                    'remote_ip' => $ip,
+                    'callback_IP' => $hostValue,
+                    'auto_host_ip' => $hostAuto,
+                    'hostForRemote' => $hostForRemote,
+                    'driver_url' => $driverUrl,
+                    'note' => ($hostValue !== '' ? 'using callback_IP' : 'using auto host IP from Sys_GetNetworkInfo')
+                ], JSON_UNESCAPED_SLASHES), 0);
             $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_AUTH,
                 '📡 API key present=' . (!empty($apiKey) ? 'yes' : 'no') . ' | token=' . (method_exists($this, 'MaskToken') ? $this->MaskToken($token) : (!empty($token) ? '***' : '(none)')),
                 0
@@ -4325,7 +4936,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
 
             $payload = [
-                'driver_id' => 'symcon-unfoldedcircle',
+                'driver_id' => $this->GetDriverId(),
                 'name' => [
                     'en' => 'Symcon external driver',
                     'de' => 'Symcon externer Treiber',
@@ -4334,9 +4945,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     'fr' => 'Pilote externe Symcon',
                     'es' => 'Controlador externo de Symcon'
                 ],
-                'driver_url' => 'ws://' . $hostForRemote . ':9988',
+                'driver_url' => $driverUrl,
                 'token' => $token,
-                'auth_method' => 'HEADER',
+                'auth_method' => 'MESSAGE',
                 'version' => '0.5.0',
                 'icon' => 'custom:symcon_icon.png',
                 'enabled' => true,
@@ -4426,6 +5037,30 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'count' => count($results),
             'results' => $results
         ];
+    }
+
+    // IP-Adresse des Symcon Hosts ermitteln (erste gefundene IPv4 aus Sys_GetNetworkInfo)
+    private function GetHostIP(): string
+    {
+        $network = Sys_GetNetworkInfo();
+        $ip_host = [];
+        foreach ($network as $device) {
+            if (!isset($device['IP'])) {
+                continue;
+            }
+            $ips = $device['IP'];
+            if (!is_array($ips)) {
+                $ips = [$ips];
+            }
+            foreach ($ips as $ip) {
+                $ip = trim((string)$ip);
+                // accept only IPv4 here
+                if ($ip !== '' && preg_match('/^(\d{1,3}\.){3}\d{1,3}$/', $ip)) {
+                    $ip_host[] = $ip;
+                }
+            }
+        }
+        return $ip_host[0] ?? '';
     }
 
     /**
@@ -6437,340 +7072,6 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         $ips = array_values(array_unique(array_filter($ips, fn($v) => $v !== '')));
         return $ips;
-    }
-
-    private function DebugFilterMatches(string $message, $data, string $topic, int $level): bool
-    {
-        // Level gate is ALWAYS applied
-        $cfgLevel = (int)$this->ReadPropertyInteger('debug_level');
-        if ($cfgLevel < self::LV_BASIC) {
-            $cfgLevel = self::LV_BASIC;
-        }
-        if ($level > $cfgLevel) {
-            return false;
-        }
-
-        // Topic gate (empty = allow all)
-        $enabledTopics = $this->GetEnabledDebugTopics();
-        if (!empty($enabledTopics)) {
-            $topicUpper = strtoupper($topic);
-            if (!in_array($topicUpper, $enabledTopics, true)) {
-                return false;
-            }
-        }
-
-        // If filters are disabled, we're done (after level/topic gating)
-        if (!(bool)$this->ReadPropertyBoolean('debug_filter_enabled')) {
-            return true;
-        }
-
-        // BASIC is always visible, even when filters are enabled.
-        // (Level/topic selection still applies above.)
-        if ($level === self::LV_BASIC) {
-            return true;
-        }
-
-        $entityIds = $this->ParseCsvList((string)$this->ReadPropertyString('debug_entity_ids'));
-        $varIds = $this->ParseCsvList((string)$this->ReadPropertyString('debug_var_ids'));
-        $clientIps = $this->GetConfiguredClientIPs();
-
-        $textFilter = (string)$this->ReadPropertyString('debug_text_filter');
-        $textIsRegex = (bool)$this->ReadPropertyBoolean('debug_text_is_regex');
-        $strict = (bool)$this->ReadPropertyBoolean('debug_strict_match');
-
-        // Instance/device filter (select instance -> resolve mapped VarIDs)
-        $instanceRows = json_decode($this->ReadPropertyString('debug_filter_instances'), true);
-        if (is_array($instanceRows)) {
-            foreach ($instanceRows as $row) {
-                if (!is_array($row)) continue;
-                $iid = (int)($row['instance_id'] ?? 0);
-                if ($iid <= 0 || !IPS_InstanceExists($iid)) continue;
-
-                foreach ($this->GetMappedVarIdsForInstance($iid) as $vid) {
-                    $varIds[] = (string)$vid;
-                }
-            }
-            $varIds = array_values(array_unique(array_filter($varIds, fn($v) => $v !== '')));
-        }
-
-
-        // Prepare haystack
-        if (is_string($data)) {
-            $dataStr = $data;
-        } elseif (is_array($data) || is_object($data)) {
-            $dataStr = json_encode($data, JSON_UNESCAPED_SLASHES);
-        } else {
-            $dataStr = (string)$data;
-        }
-        $haystack = $message . ' ' . $dataStr;
-
-        $matches = [];
-
-        if (!empty($entityIds)) {
-            foreach ($entityIds as $e) {
-                if ($e !== '' && strpos($haystack, $e) !== false) {
-                    $matches[] = true;
-                    break;
-                }
-            }
-        }
-
-        if (!empty($varIds)) {
-            foreach ($varIds as $v) {
-                if ($v !== '' && strpos($haystack, (string)$v) !== false) {
-                    $matches[] = true;
-                    break;
-                }
-            }
-        }
-
-        if (!empty($clientIps)) {
-            foreach ($clientIps as $ip) {
-                if ($ip !== '' && strpos($haystack, $ip) !== false) {
-                    $matches[] = true;
-                    break;
-                }
-            }
-        }
-
-        if (trim($textFilter) !== '') {
-            if ($textIsRegex) {
-                $ok = @preg_match($textFilter, $haystack) === 1;
-                $matches[] = $ok;
-            } else {
-                $matches[] = (strpos($haystack, $textFilter) !== false);
-            }
-        }
-
-        // If no actual filter set besides enabled -> allow (avoid hiding everything)
-        $anyConfigured = !empty($entityIds) || !empty($varIds) || !empty($clientIps) || trim($textFilter) !== '';
-        if (!$anyConfigured) {
-            return true;
-        }
-
-        // Strict: require at least one match
-        if ($strict) {
-            return in_array(true, $matches, true);
-        }
-
-        return true;
-    }
-
-    private function DebugThrottleAllow(string $key): bool
-    {
-        $ms = (int)$this->ReadPropertyInteger('debug_throttle_ms');
-        if ($ms <= 0) {
-            return true;
-        }
-
-        $now = (int)floor(microtime(true) * 1000);
-        $bufKey = 'dbg_throttle_' . md5($key);
-        $last = (int)$this->GetBuffer($bufKey);
-
-        if ($last > 0 && ($now - $last) < $ms) {
-            return false;
-        }
-
-        $this->SetBuffer($bufKey, (string)$now);
-        return true;
-    }
-
-    // -----------------------------
-    // Debug Levels (lowest = BASIC)
-    // -----------------------------
-    public const LV_BASIC = 1;
-    public const LV_ERROR = 2;
-    public const LV_WARN = 3;
-    public const LV_INFO = 4;
-    public const LV_TRACE = 5;
-
-    // -----------------------------
-    // Debug Topics
-    // -----------------------------
-    public const TOPIC_GEN = 'GEN';
-    public const TOPIC_AUTH = 'AUTH';
-    public const TOPIC_HOOK = 'HOOK';
-    public const TOPIC_WS = 'WS';
-    public const TOPIC_DEVICE = 'DEVICE';
-    public const TOPIC_IO = 'IO';
-    public const TOPIC_ENTITY = 'ENTITY';
-    public const TOPIC_VM = 'VM';
-    public const TOPIC_DISCOVERY = 'DISCOVERY';
-    public const TOPIC_API = 'API';
-    public const TOPIC_FORM = 'FORM';
-    public const TOPIC_EXT = 'EXT';
-    // Debug topics
-    const TOPIC_SETUP = 'SETUP';
-
-    public const TOPIC_CMD = 'CMD';
-
-    /**
-     * Structured debug output with topic/level filtering and throttling.
-     * Lowest level is BASIC (1). There is no OFF level.
-     */
-    public function Debug(string $Message, int $Level, string $Topic, $Data, int $Format = 0): bool
-    {
-        // If expert debug is OFF: classic behavior, but respect debug_level threshold.
-        if (!(bool)$this->ReadPropertyBoolean('expert_debug')) {
-            $cfgLevel = (int)$this->ReadPropertyInteger('debug_level');
-            if ($cfgLevel < self::LV_BASIC) {
-                $cfgLevel = self::LV_BASIC;
-            }
-            if ($Level > $cfgLevel) {
-                return false;
-            }
-            return parent::SendDebug($Message, $this->DebugDataToString($Data), $Format);
-        }
-
-        // Expert debug: apply topic + filters + throttle
-        $topicUpper = strtoupper(trim($Topic));
-        if ($topicUpper === '') {
-            $topicUpper = self::TOPIC_GEN;
-        }
-
-        if (!$this->DebugFilterMatches($Message, $Data, $topicUpper, $Level)) {
-            return false;
-        }
-
-        $thKey = $topicUpper . '|' . $Level . '|' . $Message . '|' . $this->DebugDataToString($Data);
-        if (!$this->DebugThrottleAllow($thKey)) {
-            return false;
-        }
-
-        // Make topic+level visible in the debug list (left column)
-        $lvl = $this->DebugLevelToShortName($Level);
-        $msgOut = '[' . $topicUpper . '|' . $lvl . '] ' . $Message;
-
-        return parent::SendDebug($msgOut, $this->DebugDataToString($Data), $Format);
-    }
-
-    private function DebugLevelToShortName(int $level): string
-    {
-        return match ($level) {
-            self::LV_BASIC => 'BASIC',
-            self::LV_ERROR => 'ERROR',
-            self::LV_WARN => 'WARN',
-            self::LV_INFO => 'INFO',
-            self::LV_TRACE => 'TRACE',
-            default => (string)$level
-        };
-    }
-
-    private function DebugDataToString($Data): string
-    {
-        if (is_string($Data)) {
-            return $Data;
-        }
-        if (is_scalar($Data)) {
-            return (string)$Data;
-        }
-        $json = json_encode($Data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        return $json === false ? '[unserializable]' : $json;
-    }
-
-    private function SendDebugExtended($Message, $Data, $Format = 0): void
-    {
-        $msg = is_string($Message) ? $Message : (string)$Message;
-        $this->Debug($msg, self::LV_TRACE, self::TOPIC_EXT, $Data, (int)$Format);
-    }
-
-    /**
-     * Test method to manually trigger filtered debug output.
-     * Can be called via IPS console or temporary button.
-     */
-    public function TestFilteredDebug(): void
-    {
-        $this->Debug(__FUNCTION__, self::LV_BASIC, self::TOPIC_GEN, '🧪 BASIC test output', 0);
-        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_WS, '📤 Simulated transmit to 192.168.0.50:12345', 0);
-
-        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, [
-            'entity_id' => 'sensor_12345',
-            'value' => 42,
-            'unit' => '°C'
-        ], 0);
-
-        $this->Debug(__FUNCTION__, self::LV_ERROR, self::TOPIC_AUTH, '❌ Simulated auth error', 0);
-        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_VM, '🔁 High frequency event simulation', 0);
-
-        $this->SendDebug(__FUNCTION__, '✅ TestFilteredDebug executed', 0);
-    }
-
-    private function GetDebugTopicMasterList(): array
-    {
-        return [
-            self::TOPIC_GEN => 'General / module lifecycle',
-            self::TOPIC_AUTH => 'Authentication / token / whitelist',
-            self::TOPIC_HOOK => 'Webhook requests / responses',
-            self::TOPIC_WS => 'WebSocket frames / low-level',
-            self::TOPIC_DEVICE => 'Device',
-            self::TOPIC_IO => 'Socket I/O / transport details',
-            self::TOPIC_ENTITY => 'Entity updates sent to Remote 3',
-            self::TOPIC_VM => 'Variable/MessageSink processing',
-            self::TOPIC_DISCOVERY => 'Discovery / device mapping helpers',
-            self::TOPIC_API => 'Remote API calls',
-            self::TOPIC_FORM => 'Form/UI helpers / sessions list',
-            self::TOPIC_EXT => 'Extended / verbose debug',
-            self::TOPIC_SETUP => 'Driver setup flow (setup_driver / driver_setup_change / set_driver_user_data)',
-            self::TOPIC_CMD => 'Incoming commands + responses (entity_command, action calls, result)',
-        ];
-    }
-
-    private function BuildDebugTopicsConfig(): array
-    {
-        $raw = $this->ReadPropertyString('debug_topics_cfg');
-        $cfg = json_decode($raw, true);
-
-        $master = $this->GetDebugTopicMasterList();
-        $result = [];
-
-        // If config exists: use it
-        $enabledByTopic = [];
-        if (is_array($cfg)) {
-            foreach ($cfg as $row) {
-                if (!is_array($row)) continue;
-                $t = strtoupper(trim((string)($row['topic'] ?? '')));
-                if ($t === '') continue;
-                $enabledByTopic[$t] = (bool)($row['enabled'] ?? true);
-            }
-        }
-
-        // Build full list (all topics default enabled)
-        foreach ($master as $topic => $desc) {
-            $topic = strtoupper($topic);
-            $result[] = [
-                'enabled' => $enabledByTopic[$topic] ?? true,
-                'topic' => $topic,
-                'description' => $desc
-            ];
-        }
-
-        return $result;
-    }
-
-    private function GetEnabledDebugTopics(): array
-    {
-        // If user never touched topics -> allow all (empty list means "no restriction")
-        $rows = json_decode($this->ReadPropertyString('debug_topics_cfg'), true);
-        if (!is_array($rows)) {
-            return []; // allow all
-        }
-
-        $enabled = [];
-        foreach ($rows as $row) {
-            if (!is_array($row)) continue;
-            $topic = strtoupper(trim((string)($row['topic'] ?? '')));
-            if ($topic === '') continue;
-            if ((bool)($row['enabled'] ?? true)) {
-                $enabled[] = $topic;
-            }
-        }
-
-        // If all are disabled (user error) -> treat as allow all (avoid "no debug at all")
-        if (count($enabled) === 0) {
-            return [];
-        }
-
-        return array_values(array_unique($enabled));
     }
 
     /**

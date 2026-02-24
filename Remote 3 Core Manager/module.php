@@ -2,8 +2,12 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/../libs/DebugTrait.php';
+require_once __DIR__ . '/../libs/UcrApiHelper.php';
+
 class Remote3CoreManager extends IPSModuleStrict
 {
+    use DebugTrait;
     const DEFAULT_WS_PROTOCOL = 'ws://';
 
     const DEFAULT_WSS_PROTOCOL = 'wss://';
@@ -11,6 +15,31 @@ class Remote3CoreManager extends IPSModuleStrict
 
     const DEFAULT_WSS_PORT = 8443;
     const DEFAULT_WS_PATH = '/ws';
+
+    private ?UcrApiHelper $apiHelper = null;
+
+    private function Api(): UcrApiHelper
+    {
+        if ($this->apiHelper === null) {
+            $this->apiHelper = new UcrApiHelper($this);
+        }
+        return $this->apiHelper;
+    }
+
+    public function GetApiKey(): string
+    {
+        return $this->Api()->GetApiKey();
+    }
+
+    public function ResetApiKey(): bool
+    {
+        return $this->Api()->ResetApiKey();
+    }
+
+    public function UploadSymconIcon(): string
+    {
+        return $this->Api()->UploadSymconIcon();
+    }
 
     public function GetCompatibleParents(): string
     {
@@ -24,295 +53,6 @@ class Remote3CoreManager extends IPSModuleStrict
         ]);
     }
 
-    private function EnsureApiKey(bool $forceRenew = false): bool
-    {
-        $this->SendDebug(__FUNCTION__, 'started' . ($forceRenew ? ' (forceRenew=true)' : ''), 0);
-
-        // --- read config ---
-        $host = $this->ReadPropertyString('host');
-        $user = $this->ReadPropertyString('web_config_user');
-        $pass = $this->ReadPropertyString('web_config_pass');
-
-        if ($host === '' || $user === '' || $pass === '') {
-            $this->SendDebug(__FUNCTION__, '❌ Fehlende Konfiguration (host/user/pass).', 0);
-            return false;
-        }
-
-        // Ensure api_key_name exists
-        if ($this->ReadAttributeString('api_key_name') === '') {
-            $uuid = $this->ReadAttributeString('symcon_uuid');
-            if ($uuid === '') {
-                $uuid = bin2hex(random_bytes(8));
-                $this->WriteAttributeString('symcon_uuid', $uuid);
-            }
-            $this->WriteAttributeString('api_key_name', 'Symcon Access ' . $uuid);
-        }
-
-        $name = $this->ReadAttributeString('api_key_name');
-        if ($name === '') {
-            $this->SendDebug(__FUNCTION__, '❌ Fehler: api_key_name leer.', 0);
-            return false;
-        }
-
-        // --- helper: HTTP request ---
-        $httpRequest = function (string $method, string $url, array $headers = [], ?string $basicUser = null, ?string $basicPass = null, ?string $body = null): array {
-            $ch = curl_init($url);
-            $opts = [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_CUSTOMREQUEST => strtoupper($method),
-                CURLOPT_TIMEOUT => 10,
-                CURLOPT_HTTPHEADER => $headers
-            ];
-            if ($basicUser !== null && $basicPass !== null) {
-                $opts[CURLOPT_USERPWD] = $basicUser . ':' . $basicPass;
-            }
-            if ($body !== null) {
-                $opts[CURLOPT_POSTFIELDS] = $body;
-            }
-            curl_setopt_array($ch, $opts);
-            $resp = curl_exec($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $err = curl_error($ch);
-            curl_close($ch);
-            return [
-                'httpCode' => $httpCode,
-                'response' => ($resp === false ? '' : $resp),
-                'error' => $err
-            ];
-        };
-
-        // --- Step 1: Validate stored API key by doing a Bearer request ---
-        $storedApiKey = $this->ReadAttributeString('api_key');
-        if (!$forceRenew && $storedApiKey !== '') {
-            $this->SendDebug(__FUNCTION__, '🔐 Prüfe gespeicherten API-Key via /api/system ...', 0);
-            $test = $httpRequest(
-                'GET',
-                "http://$host/api/system",
-                [
-                    'Content-Type: application/json',
-                    'Authorization: Bearer ' . $storedApiKey
-                ]
-            );
-
-            $this->SendDebug(__FUNCTION__, '🔐 Bearer Test HTTP-Code: ' . $test['httpCode'], 0);
-            if ($test['error'] !== '') {
-                $this->SendDebug(__FUNCTION__, '❌ CURL Error (bearer test): ' . $test['error'], 0);
-            }
-
-            // 200 => key ok, keep it
-            if ($test['httpCode'] >= 200 && $test['httpCode'] < 300) {
-                $this->SendDebug(__FUNCTION__, '✅ Gespeicherter API-Key ist gültig.', 0);
-                return true;
-            }
-
-            // 401/403 (or any non-2xx) => treat as invalid, renew
-            $this->SendDebug(__FUNCTION__, '⚠️ Gespeicherter API-Key scheint ungültig oder nicht mehr berechtigt. Erneuerung wird gestartet.', 0);
-            $forceRenew = true;
-        }
-
-        // --- Step 2: With Basic Auth, check whether a key with our name exists and is active ---
-        $this->SendDebug(__FUNCTION__, '🔎 Prüfe vorhandene API-Keys via Basic Auth: ' . $name, 0);
-        $list = $httpRequest(
-            'GET',
-            "http://$host/api/auth/api_keys?active=true",
-            ['Content-Type: application/json'],
-            $user,
-            $pass
-        );
-
-        $this->SendDebug(__FUNCTION__, '📥 Existing Key Request HTTP-Code: ' . $list['httpCode'], 0);
-        $this->SendDebug(__FUNCTION__, '📥 Existing Key Response: ' . $list['response'], 0);
-
-        if ($list['error'] !== '') {
-            $this->SendDebug(__FUNCTION__, '❌ CURL Error (list): ' . $list['error'], 0);
-            return false;
-        }
-        if ($list['httpCode'] === 401 || $list['httpCode'] === 403) {
-            $this->SendDebug(__FUNCTION__, '❌ Basic Auth fehlgeschlagen (user/pass ungültig).', 0);
-            return false;
-        }
-
-        $existingKeys = json_decode($list['response'], true);
-        if (!is_array($existingKeys)) {
-            $this->SendDebug(__FUNCTION__, '❌ Ungültige Antwortstruktur beim Abrufen vorhandener Keys.', 0);
-            return false;
-        }
-
-        $keys = isset($existingKeys['results']) ? $existingKeys['results'] : $existingKeys;
-
-        $foundKeyId = null;
-        foreach ($keys as $key) {
-            if (isset($key['name']) && $key['name'] === $name) {
-                // API returns key identifier as key_id
-                if (isset($key['key_id'])) {
-                    $foundKeyId = $key['key_id'];
-                }
-                break;
-            }
-        }
-
-        // --- Step 3: If we want to renew or we have no stored key, revoke existing key with same name (if any) ---
-        if ($forceRenew || $storedApiKey === '') {
-            // Clear local key first
-            if ($storedApiKey !== '') {
-                $this->WriteAttributeString('api_key', '');
-                $storedApiKey = '';
-            }
-
-            if ($foundKeyId !== null) {
-                $this->SendDebug(__FUNCTION__, '🧹 Revoke existing key with same name. key_id=' . $foundKeyId, 0);
-                $del = $httpRequest(
-                    'DELETE',
-                    "http://$host/api/auth/api_keys/" . urlencode((string)$foundKeyId),
-                    ['Content-Type: application/json'],
-                    $user,
-                    $pass
-                );
-                $this->SendDebug(__FUNCTION__, '🧹 Revoke HTTP-Code: ' . $del['httpCode'], 0);
-                $this->SendDebug(__FUNCTION__, '🧹 Revoke Response: ' . $del['response'], 0);
-                if ($del['error'] !== '') {
-                    $this->SendDebug(__FUNCTION__, '❌ CURL Error (revoke): ' . $del['error'], 0);
-                    return false;
-                }
-                // if revoke fails, still try to create a new key with a new name as fallback
-                if ($del['httpCode'] < 200 || $del['httpCode'] >= 300) {
-                    $this->SendDebug(__FUNCTION__, '⚠️ Revoke nicht erfolgreich. Fallback: neuer Key-Name wird generiert.', 0);
-                    $uuid = $this->ReadAttributeString('symcon_uuid');
-                    if ($uuid === '') {
-                        $uuid = bin2hex(random_bytes(8));
-                        $this->WriteAttributeString('symcon_uuid', $uuid);
-                    }
-                    $newName = 'Symcon Access ' . $uuid . ' ' . date('YmdHis');
-                    $this->WriteAttributeString('api_key_name', $newName);
-                    $name = $newName;
-                    $foundKeyId = null;
-                }
-            }
-        } else {
-            // Not forceRenew and no stored key means we cannot use existing token value.
-            // If the key exists on remote but is not stored locally, we must revoke and re-create.
-            if ($storedApiKey === '' && $foundKeyId !== null) {
-                $this->SendDebug(__FUNCTION__, '⚠️ Key existiert auf der Remote, aber token fehlt lokal. Revoke + Neu erstellen.', 0);
-                $forceRenew = true;
-                $del = $httpRequest(
-                    'DELETE',
-                    "http://$host/api/auth/api_keys/" . urlencode((string)$foundKeyId),
-                    ['Content-Type: application/json'],
-                    $user,
-                    $pass
-                );
-                $this->SendDebug(__FUNCTION__, '🧹 Revoke HTTP-Code: ' . $del['httpCode'], 0);
-                $this->SendDebug(__FUNCTION__, '🧹 Revoke Response: ' . $del['response'], 0);
-                if ($del['error'] !== '') {
-                    $this->SendDebug(__FUNCTION__, '❌ CURL Error (revoke): ' . $del['error'], 0);
-                    return false;
-                }
-                if ($del['httpCode'] < 200 || $del['httpCode'] >= 300) {
-                    $this->SendDebug(__FUNCTION__, '⚠️ Revoke nicht erfolgreich. Fallback: neuer Key-Name wird generiert.', 0);
-                    $uuid = $this->ReadAttributeString('symcon_uuid');
-                    if ($uuid === '') {
-                        $uuid = bin2hex(random_bytes(8));
-                        $this->WriteAttributeString('symcon_uuid', $uuid);
-                    }
-                    $newName = 'Symcon Access ' . $uuid . ' ' . date('YmdHis');
-                    $this->WriteAttributeString('api_key_name', $newName);
-                    $name = $newName;
-                }
-            }
-        }
-
-        // --- Step 4: Create new key (Basic Auth) ---
-        $this->SendDebug(__FUNCTION__, '🆕 Erstelle neuen API-Key: ' . $name, 0);
-        $createBody = json_encode([
-            'name' => $name,
-            'scopes' => ['admin'],
-            'description' => 'Created from Symcon module'
-        ]);
-
-        $create = $httpRequest(
-            'POST',
-            "http://$host/api/auth/api_keys",
-            ['Content-Type: application/json'],
-            $user,
-            $pass,
-            $createBody
-        );
-
-        $this->SendDebug(__FUNCTION__, '📥 Create HTTP-Code: ' . $create['httpCode'], 0);
-        $this->SendDebug(__FUNCTION__, '📥 Create Response: ' . $create['response'], 0);
-
-        if ($create['error'] !== '') {
-            $this->SendDebug(__FUNCTION__, '❌ CURL Error (create): ' . $create['error'], 0);
-            return false;
-        }
-
-        $data = json_decode($create['response'], true);
-        if (is_array($data) && isset($data['api_key']) && $data['api_key'] !== '') {
-            $newKey = (string)$data['api_key'];
-            $this->WriteAttributeString('api_key', $newKey);
-            $this->SendDebug(__FUNCTION__, '✅ API-Key gespeichert.', 0);
-
-            // Auto-upload icon once after obtaining an API key
-            if (!$this->ReadAttributeBoolean('icon_uploaded')) {
-                $this->SendDebug(__FUNCTION__, '🖼️ Auto-uploading Symcon icon...', 0);
-                $uploadResult = $this->UploadSymconIcon();
-                $decodedUpload = json_decode($uploadResult, true);
-                if (is_array($decodedUpload) && ($decodedUpload['success'] ?? false) === true) {
-                    $this->WriteAttributeBoolean('icon_uploaded', true);
-                    $this->SendDebug(__FUNCTION__, '✅ Symcon icon uploaded.', 0);
-                } else {
-                    $this->SendDebug(__FUNCTION__, '⚠️ Symcon icon upload failed: ' . $uploadResult, 0);
-                }
-            }
-
-            return true;
-        }
-
-        $this->SendDebug(__FUNCTION__, '❌ Kein API-Key erhalten. Hinweis: Key muss ggf. auf der Remote bestätigt werden.', 0);
-        return false;
-    }
-
-    public function GetApiKey(): string
-    {
-        $this->SendDebug(__FUNCTION__, 'started', 0);
-
-        $host = $this->ReadPropertyString('host');
-        $pass = $this->ReadPropertyString('web_config_pass');
-
-        // Only attempt to create/validate an API key once the required fields are present.
-        if ($host !== '' && $pass !== '') {
-            $this->EnsureApiKey();
-        } else {
-            $this->SendDebug(__FUNCTION__, '⏸️ Skip EnsureApiKey (Host/Password missing).', 0);
-        }
-
-        $api_key = $this->ReadAttributeString('api_key');
-        $this->SendDebug('API Key', $api_key, 0);
-        return $api_key;
-    }
-
-    /**
-     * Reset the stored API key and request a new one from the Remote.
-     * This will revoke an existing API key with the same name (if possible) and create a new one.
-     */
-    public function ResetApiKey(): bool
-    {
-        $this->SendDebug(__FUNCTION__, '🔄 Reset API-Key gestartet', 0);
-        // Clear local token first
-        $this->WriteAttributeString('api_key', '');
-        $this->WriteAttributeBoolean('icon_uploaded', false);
-
-        // Force renew (revoke + create)
-        $ok = $this->EnsureApiKey(true);
-
-        // Rebuild parent configuration so WS uses the new token
-        $this->ApplyChanges();
-
-        $this->SendDebug(__FUNCTION__, $ok ? '✅ Reset erfolgreich' : '❌ Reset fehlgeschlagen', 0);
-        return $ok;
-    }
-
-
     public function Create(): void
     {
         //Never delete this line!
@@ -321,6 +61,7 @@ class Remote3CoreManager extends IPSModuleStrict
         $this->RegisterPropertyString('name', '');
         $this->RegisterPropertyString('hostname', '');
         $this->RegisterPropertyString('host', '');
+        $this->RegisterAttributeString('remote_host', '');
         $this->RegisterPropertyString('remote_id', '');
         $this->RegisterPropertyString('model', '');
         $this->RegisterPropertyString('version', '');
@@ -345,8 +86,7 @@ class Remote3CoreManager extends IPSModuleStrict
 
         $this->RegisterPropertyString('web_config_user', 'web-configurator');
         $this->RegisterPropertyString('web_config_pass', '');
-
-        // $this->ConnectParent('{D68FD31F-0E90-7019-F16C-1949BD3079EF}'); // Websocket Client
+        $this->RegisterAttributeString('web_config_pass', '');
 
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
@@ -380,6 +120,8 @@ class Remote3CoreManager extends IPSModuleStrict
             // Use INACTIVE to indicate that the instance needs configuration.
             $this->SetStatus(IS_INACTIVE);
         } else {
+            $this->WriteAttributeString('remote_host', $host);
+            $this->WriteAttributeString('web_config_pass', $pass);
             // Config present; mark active for now (we may downgrade later if key creation fails)
             $this->SetStatus(IS_ACTIVE);
         }
@@ -930,91 +672,6 @@ class Remote3CoreManager extends IPSModuleStrict
         if ($Message == IPS_KERNELMESSAGE && $Data[0] == KR_READY) {
             $this->SendDebug(__FUNCTION__, "Kernel Ready", 0);
         }
-    }
-
-    /**
-     * Uploads the Symcon integration icon to the Remote 3 so it can be shown for the integration.
-     * Requires host + API key to be available.
-     */
-    public function UploadSymconIcon(): string
-    {
-        $this->SendDebug(__FUNCTION__, 'started', 0);
-
-        $host = $this->ReadPropertyString('host');
-        if ($host === '') {
-            $msg = 'Host is missing.';
-            $this->SendDebug(__FUNCTION__, '❌ ' . $msg, 0);
-            return json_encode(['success' => false, 'message' => $msg]);
-        }
-
-        // Ensure we have an API key first
-        if (!$this->EnsureApiKey()) {
-            $msg = 'API key missing or could not be created.';
-            $this->SendDebug(__FUNCTION__, '❌ ' . $msg, 0);
-            return json_encode(['success' => false, 'message' => $msg]);
-        }
-
-        $apiKey = $this->ReadAttributeString('api_key');
-        if ($apiKey === '') {
-            $msg = 'API key is empty.';
-            $this->SendDebug(__FUNCTION__, '❌ ' . $msg, 0);
-            return json_encode(['success' => false, 'message' => $msg]);
-        }
-
-        $filePath = __DIR__ . '/../imgs/symcon_icon.png';
-        $this->SendDebug(__FUNCTION__, 'Icon path: ' . $filePath, 0);
-        if (!file_exists($filePath)) {
-            $msg = 'Icon file not found: ' . $filePath;
-            $this->SendDebug(__FUNCTION__, '❌ ' . $msg, 0);
-            return json_encode(['success' => false, 'message' => $msg]);
-        }
-
-        $url = 'http://' . $host . '/api/resources/Icon';
-        $this->SendDebug(__FUNCTION__, 'POST ' . $url, 0);
-
-        $ch = curl_init();
-        $headers = [
-            'Accept: application/json',
-            'Authorization: Bearer ' . $apiKey
-        ];
-
-        $postFields = [
-            'file' => new CURLFile($filePath)
-        ];
-
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_CUSTOMREQUEST => 'POST',
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_POSTFIELDS => $postFields
-        ]);
-
-        $resp = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $err = curl_error($ch);
-        curl_close($ch);
-
-        $this->SendDebug(__FUNCTION__, 'HTTP ' . $httpCode, 0);
-        if ($err !== '') {
-            $this->SendDebug(__FUNCTION__, '❌ CURL Error: ' . $err, 0);
-            return json_encode(['success' => false, 'message' => $err]);
-        }
-
-        $this->SendDebug(__FUNCTION__, 'Response: ' . (string)$resp, 0);
-
-        if ($httpCode < 200 || $httpCode >= 300) {
-            return json_encode(['success' => false, 'message' => 'Upload failed', 'httpCode' => $httpCode, 'response' => (string)$resp]);
-        }
-
-        // Return parsed JSON if possible
-        $decoded = json_decode((string)$resp, true);
-        if (is_array($decoded)) {
-            return json_encode(['success' => true, 'httpCode' => $httpCode, 'data' => $decoded]);
-        }
-
-        return json_encode(['success' => true, 'httpCode' => $httpCode, 'response' => (string)$resp]);
     }
 
     // === REST API Command Methods ===
@@ -1571,7 +1228,7 @@ class Remote3CoreManager extends IPSModuleStrict
      *
      * @return array
      */
-    protected function FormHead()
+    protected function FormHead(): array
     {
         $api_key = $this->GetApiKey();
         $api_key_name = $this->ReadAttributeString('api_key_name');

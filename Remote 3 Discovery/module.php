@@ -2,8 +2,11 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/../libs/DnssdRemoteDiscoveryTrait.php';
+
 class Remote3Discovery extends IPSModuleStrict
 {
+    use DnssdRemoteDiscoveryTrait;
     const DEFAULT_WS_PROTOCOL = 'ws://';
     const DEFAULT_WS_PORT = 8080;
 
@@ -79,6 +82,21 @@ class Remote3Discovery extends IPSModuleStrict
         $devices = $this->SearchRemotes();
         $this->SendDebug('Discover Response:', json_encode($devices), 0);
         $remote_info = $this->GetRemoteInfo($devices);
+        // Backward compatibility: trait returns host_ipv4/host_ipv6, but older code expects `host`
+        if (is_array($remote_info)) {
+            foreach ($remote_info as $k => $dev) {
+                if (!is_array($dev)) {
+                    continue;
+                }
+                // Prefer IPv4 for all UI/config usage, fallback to IPv6
+                if (!isset($dev['host']) || trim((string)$dev['host']) === '') {
+                    $ip4 = trim((string)($dev['host_ipv4'] ?? ''));
+                    $ip6 = trim((string)($dev['host_ipv6'] ?? ''));
+                    $dev['host'] = $ip4 !== '' ? $ip4 : $ip6;
+                    $remote_info[$k] = $dev;
+                }
+            }
+        }
         if (empty($remote_info)) {
             $this->SendDebug('Discover:', 'could not find Remote 3 info', 0);
         } else {
@@ -120,16 +138,6 @@ class Remote3Discovery extends IPSModuleStrict
         return $dock_info;
     }
 
-    public function SearchRemotes(): array
-    {
-        $mDNSInstanceID = $this->GetDNSSD();
-        if ($mDNSInstanceID === 0) {
-            return [];
-        }
-        $remotes = ZC_QueryServiceType($mDNSInstanceID, '_uc-remote._tcp', 'local');
-        return $remotes;
-    }
-
     public function SearchDocks(): array
     {
         $mDNSInstanceID = $this->GetDNSSD();
@@ -138,102 +146,6 @@ class Remote3Discovery extends IPSModuleStrict
         }
         $docks = ZC_QueryServiceType($mDNSInstanceID, '_uc-dock._tcp', 'local');
         return $docks;
-    }
-
-
-    private function GetDNSSD(): int
-    {
-        $mDNSInstanceIDs = IPS_GetInstanceListByModuleID('{780B2D48-916C-4D59-AD35-5A429B2355A5}');
-        if (empty($mDNSInstanceIDs)) {
-            return 0;
-        }
-        $mDNSInstanceID = $mDNSInstanceIDs[0];
-        return $mDNSInstanceID;
-    }
-
-    protected function GetRemoteInfo(array $devices): array
-    {
-        $mDNSInstanceID = $this->GetDNSSD();
-        $remote_info = [];
-        $seen_ids = [];
-        $seen_hosts = [];
-        foreach ($devices as $key => $remote) {
-            $mDNS_name = $remote['Name'];
-            $response = ZC_QueryService($mDNSInstanceID, $mDNS_name, '_uc-remote._tcp', 'local.');
-            foreach ($response as $data) {
-                $this->SendDebug('GetRemoteInfo:', json_encode($data), 0);
-                $name = '';
-                $hostname = '';
-                $ip = '';
-                $port = 0;
-                $model = '';
-                $version = '';
-                $https_port = '';
-
-                if (isset($data['Name'])) {
-                    $name = str_ireplace('._uc-remote._tcp.local.', '', $data['Name']);
-                }
-
-                if (isset($data['Host'])) {
-                    $hostname = str_ireplace('.local.', '', $data['Host']);
-                }
-
-                if (isset($data['Port'])) {
-                    $port = $data['Port'];
-                }
-
-                if (isset($data['TXTRecords']) && is_array($data['TXTRecords'])) {
-                    foreach ($data['TXTRecords'] as $record) {
-                        if (str_starts_with($record, 'ver=')) {
-                            $version = substr($record, 4);
-                        }
-                        if (str_starts_with($record, 'ver_api=')) {
-                            $ver_api = substr($record, 8);
-                        }
-                        if (str_starts_with($record, 'model=')) {
-                            $model = substr($record, 6);
-                        }
-                        if (str_starts_with($record, 'https_port=')) {
-                            $https_port = substr($record, 11);
-                        }
-                    }
-                }
-
-                // Optional: IPv4-Pflicht prüfen (IPv6 ignorieren)
-                if (!isset($data['IPv4'][0])) {
-                    $this->SendDebug('GetRemoteInfo:', "⚠️ Kein IPv4 – überspringe '$name'", 0);
-                    continue;
-                }
-                $ip = $data['IPv4'][0];
-                // // Falls IPv6 erlaubt sein soll, kann man das wie vorher machen
-                // if (isset($data['IPv4'][0])) {
-                //     $ip = $data['IPv4'][0];
-                // } elseif (isset($data['IPv6'][0])) {
-                //     $ip = $data['IPv6'][0];
-                // }
-
-                // Doppelte Einträge vermeiden basierend auf IP und Hostname
-                $hostKey = $ip . '_' . $hostname;
-                if (isset($seen_hosts[$hostKey])) {
-                    $this->SendDebug('GetRemoteInfo:', "⚠️ Doppelte IP/Host-Kombination '$hostKey' – übersprungen", 0);
-                    continue;
-                }
-                $seen_hosts[$hostKey] = true;
-
-                $remote_info[$key] = [
-                    'name' => $name,
-                    'hostname' => $hostname,
-                    'host' => $ip,
-                    'port' => $port,
-                    'id' => $name, // fallback: using 'name' as ID
-                    'model' => $model,
-                    'version' => $version,
-                    'ver_api' => $ver_api ?? '',
-                    'https_port' => $https_port
-                ];
-            }
-        }
-        return $remote_info;
     }
 
     protected function GetDockInfo(array $devices): array
@@ -392,6 +304,15 @@ class Remote3Discovery extends IPSModuleStrict
         // Aktuelle Discovery
         $activeRemotes = $this->DiscoverDevices();
         $activeDocks = $this->DiscoverDocks();
+        // Defensive: ensure all remote entries have a `host` field (prefer IPv4)
+        foreach ($activeRemotes as &$r) {
+            if (!isset($r['host']) || trim((string)$r['host']) === '') {
+                $ip4 = trim((string)($r['host_ipv4'] ?? ''));
+                $ip6 = trim((string)($r['host_ipv6'] ?? ''));
+                $r['host'] = $ip4 !== '' ? $ip4 : $ip6;
+            }
+        }
+        unset($r);
 
         // Bereits bekannte Geräte laden
         $knownRemotes = json_decode($this->ReadAttributeString('known_remotes'), true);
@@ -557,7 +478,8 @@ class Remote3Discovery extends IPSModuleStrict
                     ['caption' => 'ID', 'name' => 'id', 'width' => 'auto', 'visible' => false],
                     ['caption' => 'Name', 'name' => 'name', 'width' => '200px'],
                     ['caption' => 'Hostname', 'name' => 'hostname', 'width' => '200px'],
-                    ['caption' => 'Host (IP)', 'name' => 'host', 'width' => '200px'],
+                    ['caption' => 'IPv4', 'name' => 'host_ipv4', 'width' => '200px'],
+                    ['caption' => 'IPv6', 'name' => 'host_ipv6', 'width' => '320px'],
                     ['caption' => 'Model', 'name' => 'model', 'width' => '120px'],
                     ['caption' => 'API Version', 'name' => 'ver_api', 'width' => '120px'],
                     ['caption' => 'Firmware', 'name' => 'version', 'width' => '120px'],
@@ -614,11 +536,14 @@ class Remote3Discovery extends IPSModuleStrict
         $config_list = [];
         $RemoteIDList = IPS_GetInstanceListByModuleID('{5894A8B3-7E60-981A-B3BA-6647335B57E4}'); // Remote 3 Device
         $devices = json_decode($this->ReadAttributeString('known_remotes'), true);
-        // Doppelte IP-Adressen filtern (nur erster Eintrag bleibt)
+        // Doppelte IP-Adressen filtern (nur erster Eintrag bleibt), bevorzugt IPv4, sonst host, sonst IPv6
         $filteredByIP = [];
         $seenIPs = [];
         foreach ($devices as $entry) {
-            $ip = $entry['host'];
+            $ip = (string)($entry['host_ipv4'] ?? $entry['host'] ?? '');
+            if (trim($ip) === '') {
+                $ip = (string)($entry['host_ipv6'] ?? '');
+            }
             if (isset($seenIPs[$ip])) {
                 $this->SendDebug(__FUNCTION__, "⚠️ Duplikat ignoriert für IP $ip (Name: {$entry['name']})", 0);
                 continue;
@@ -633,7 +558,15 @@ class Remote3Discovery extends IPSModuleStrict
                 $instanceID = 0;
                 $name = $device['name'];
                 $hostname = $device['hostname'];
-                $host = $device['host'];
+                // Always prefer IPv4 for created instances
+                $host_ipv4 = trim((string)($device['host_ipv4'] ?? ''));
+                $host_ipv6 = trim((string)($device['host_ipv6'] ?? ''));
+                $host = trim((string)($device['host'] ?? ''));
+                if ($host_ipv4 !== '') {
+                    $host = $host_ipv4;
+                } elseif ($host === '' && $host_ipv6 !== '') {
+                    $host = $host_ipv6;
+                }
                 $remote_id = $device['id'];
                 $device_id = 0;
                 foreach ($RemoteIDList as $RemoteID) {
@@ -652,6 +585,8 @@ class Remote3Discovery extends IPSModuleStrict
                     'name' => $name,
                     'hostname' => $hostname,
                     'host' => $host,
+                    'host_ipv4' => $host_ipv4,
+                    'host_ipv6' => $host_ipv6,
                     'remote_id' => $remote_id,
                     'model' => $device['model'],
                     'ver_api' => $device['ver_api'],
