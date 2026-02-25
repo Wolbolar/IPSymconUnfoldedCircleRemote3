@@ -62,6 +62,25 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         return $this->Api()->UploadSymconIcon();
     }
 
+    /**
+     * Ensures a valid API key exists (creates/validates it if needed).
+     *
+     * This is implemented in the shared UcrApiHelper and exposed here as a local wrapper
+     * so existing module code can keep calling $this->EnsureApiKey().
+     */
+    protected function EnsureApiKey(): bool
+    {
+        return $this->Api()->EnsureApiKey();
+    }
+
+    /**
+     * Legacy wrapper: kept for backward compatibility after refactor to UcrApiHelper.
+     */
+    protected function EnsureRemoteApiAccess(): array
+    {
+        return $this->Api()->EnsureRemoteApiAccess();
+    }
+
     public function GetCompatibleParents(): string
     {
         return json_encode([
