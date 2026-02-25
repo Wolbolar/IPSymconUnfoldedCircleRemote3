@@ -102,7 +102,6 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->RegisterAttributeBoolean('icon_uploaded', false);
         $this->RegisterPropertyString('web_config_user', 'web-configurator');
         // REST configuration used by UcrApiHelper
-        $this->RegisterPropertyString('host', '');
         $this->RegisterAttributeString('web_config_pass', '');
         $this->RegisterAttributeString('remote_host', '');
 
