@@ -1135,6 +1135,15 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 $this->HandleSetDriverUserData($json, $reqId, $clientIP, $clientPort);
                 break;
 
+            case 'abort_driver_setup':
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🛑 Remote aborted setup', 0);
+
+                // If this arrived as a request, acknowledge it
+                if (($kind ?? '') === 'req' && ($reqId ?? 0) > 0) {
+                    $this->SendResultOK($reqId, $clientIP, $clientPort);
+                }
+                break;
+
             case 'connect':
                 $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_WS, '🔌 Connect received – sending device_state CONNECTED', 0);
                 $this->SendDeviceState('CONNECTED', $clientIP, $clientPort);
@@ -1597,12 +1606,18 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             // Determine remote host (fallback to client IP via REST resolver)
             $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
-            if ($remoteHost === '') {
-                $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
-                if ($remoteHost !== '') {
-                    $this->WriteAttributeString('remote_host', $remoteHost);
-                }
+
+            // IMMER neu resolven (auch wenn remote_host schon gesetzt ist)
+            // bevorzugt IPv4 via remote_directory
+            $candidate = $remoteHost !== '' ? $remoteHost : $clientIP;
+            $resolved = $this->ResolveRemoteHostForRest($candidate);
+
+            if ($resolved !== '') {
+                $remoteHost = $resolved;
+                $this->WriteAttributeString('remote_host', $remoteHost);
             }
+
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🌐 Setup REST host selected: ' . $remoteHost . ' (candidate=' . $candidate . ')', 0);
 
             // Use shared helper to validate/create API key
             // ... nachdem PIN gespeichert wurde:
