@@ -36,6 +36,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     const Unfolded_Circle_API_Version = "0.12.1";
 
     const Unfolded_Circle_API_Minimum_Version = "0.12.1";
+    const DEVICE_STATE_CONNECTED = "CONNECTED";
+    const DEVICE_STATE_CONNECTING = "CONNECTING";
+    const DEVICE_STATE_DISCONNECTED = "DISCONNECTED";
+    const DEVICE_STATE_ERROR = "ERROR";
 
     private ?UcrApiHelper $apiHelper = null;
 
@@ -670,7 +674,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             if (($isAuthenticated || $isWhitelisted) && $hasPort) {
                 $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_DEVICE, "🔁 Sending device_state ping to $ip:{$entry['port']} (auth: " . ($isAuthenticated ? '✅' : '❌') . ", whitelist: " . ($isWhitelisted ? '✅' : '❌') . ")", 0);
-                $this->SendDeviceState('CONNECTED', $ip, (int)$entry['port']);
+                $this->SendDeviceState(self::DEVICE_STATE_CONNECTED, $ip, (int)$entry['port']);
             } else {
                 $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_DEVICE, "⏭️ Ping skipped for $ip (auth: " . ($isAuthenticated ? '✅' : '❌') . ", whitelist: " . ($isWhitelisted ? '✅' : '❌') . ", port: " . ($entry['port'] ?? '—') . ")", 0);
             }
@@ -1319,7 +1323,35 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             case 'connect':
                 $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_WS, '🔌 Connect received – sending device_state CONNECTED', 0);
-                $this->SendDeviceState('CONNECTED', $clientIP, $clientPort);
+                $this->SendDeviceState(self::DEVICE_STATE_CONNECTED, $clientIP, $clientPort);
+                break;
+
+            case 'get_device_state':
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DEVICE, '📡 get_device_state received → sending device_state', 0);
+
+                // Use ClientSessionTrait helpers for session/auth/whitelist detection
+                $sessions = $this->getAllClientSessions();
+
+                $whitelistRaw = json_decode($this->ReadPropertyString('ip_whitelist'), true);
+                $whitelist = is_array($whitelistRaw) ? array_map('trim', array_column($whitelistRaw, 'ip')) : [];
+                $isWhitelisted = in_array($clientIP, $whitelist, true);
+
+                $isAuthenticated = $this->isClientAuthenticated($clientIP);
+                $hasSessionPort = !empty($sessions[$clientIP]['port']);
+
+                // UC allowed states: CONNECTED, CONNECTING, DISCONNECTED, ERROR
+                if (($isAuthenticated || $isWhitelisted) && $hasSessionPort) {
+                    $state = 'CONNECTED';
+                } else {
+                    // We are talking to a client, but not yet authenticated/whitelisted.
+                    $state = 'CONNECTING';
+                }
+                $this->SendDeviceState($state, $clientIP, $clientPort);
+
+                // optional: some clients like an OK response too (harmless)
+                if (($kind ?? '') === 'req' && ($reqId ?? 0) > 0) {
+                    $this->SendResultOK($reqId, $clientIP, $clientPort);
+                }
                 break;
 
             case 'entity_command':
@@ -1423,7 +1455,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             case 'connect':
                 $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, "🔌 Remote $ip ist wieder aktiv → sende CONNECTED", 0);
-                $this->SendDeviceState('CONNECTED', $ip, $port);
+                $this->SendDeviceState(self::DEVICE_STATE_CONNECTED, $ip, $port);
                 $this->UpdateAllEntityStates();
                 if ($instanceID > 0) {
                     UCR_ReceiveDriverEvent($instanceID, $json);
@@ -7160,8 +7192,20 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         continue;
                     }
 
+                    // Insert helper for short sensor name
+                    $instName = trim((string)@IPS_GetName($iid));
+                    $varName = trim((string)@IPS_GetName($varId));
+                    $shortName = $instName;
+                    if ($shortName !== '' && $varName !== '') {
+                        $shortName .= ' – ' . $varName;
+                    } elseif ($varName !== '') {
+                        $shortName = $varName;
+                    } elseif ($shortName === '') {
+                        $shortName = 'Sensor';
+                    }
+
                     $existingSensors[] = [
-                        'name' => trim((($this->GetObjectPath($iid) !== '' ? ($this->GetObjectPath($iid) . ' → ') : '') . (string)@IPS_GetName($iid) . ' → ' . (string)@IPS_GetName($varId))),
+                        'name' => $shortName,
                         'instance_id' => $iid,
                         'var_id' => (int)$varId,
                         'unit' => (string)$unit,
