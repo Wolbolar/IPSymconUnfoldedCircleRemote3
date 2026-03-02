@@ -2644,8 +2644,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $remoteHost = str_replace('%', '%25', $remoteHost);
         }
 
-        // Falls es eine IPv6 Adresse ist (enthält Doppelpunkt), in Klammern setzen
-        if (str_contains($remoteHost, ':') && !str_starts_with($remoteHost, '[')) {
+        // Falls es eine IPv6 Adresse ist (enthält mindestens zwei Doppelpunkt), in Klammern setzen
+        if ((substr_count($remoteHost, ':') >= 2) && !str_starts_with($remoteHost, '[')) {
             $remoteHost = "[" . $remoteHost . "]";
         }
 
