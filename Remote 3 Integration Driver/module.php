@@ -41,6 +41,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     const DEVICE_STATE_DISCONNECTED = "DISCONNECTED";
     const DEVICE_STATE_ERROR = "ERROR";
 
+    // Remote client session handling
+    private const REMOTE_SESSION_TIMEOUT_SEC = 90; // after 90 seconds disconect no message is send anymore
+
     private ?UcrApiHelper $apiHelper = null;
 
     protected function Api(): UcrApiHelper
@@ -64,6 +67,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     public function UploadSymconIcon(): string
     {
         return $this->Api()->UploadSymconIcon();
+    }
+
+    public function GetToken(): string
+    {
+        return $this->ReadAttributeString("token");
     }
 
     /**
@@ -663,6 +671,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
     public function PingDeviceState(): void
     {
+        // If no Remote client is alive, avoid periodic spam.
+        if (!$this->HasAliveClients()) {
+            return;
+        }
+
         $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_DEVICE, '🔄 PingDeviceState timer triggered', 0);
         $sessions = $this->getAllClientSessions();
         $whitelist = array_map('trim', array_column(json_decode($this->ReadPropertyString('ip_whitelist'), true), 'ip'));
@@ -701,6 +714,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
     public function UpdateAllEntityStates(): void
     {
+        // If no Remote client is alive, avoid periodic spam.
+        if (!$this->HasAliveClients()) {
+            return;
+        }
+
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, '🔄 Starting periodic update of all entity states...', 0);
 
         $types = [
@@ -2969,6 +2987,67 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
     }
 
+    private function ReadClientSessions(): array
+    {
+        $raw = (string)$this->ReadAttributeString('client_sessions');
+        $sessions = json_decode($raw, true);
+        return is_array($sessions) ? $sessions : [];
+    }
+
+    // Consider a remote client session "alive" only if we saw traffic recently.
+    // Prevents spamming when the Remote is offline.
+
+    /**
+     * Returns true if a client session is considered "alive" (recently seen).
+     * Prevents endless sending when the Remote is offline but the session still exists.
+     */
+    private function IsClientSessionAlive(array $info): bool
+    {
+        $lastSeen = (int)($info['last_seen'] ?? 0);
+        if ($lastSeen <= 0) {
+            return false;
+        }
+        return (time() - $lastSeen) <= self::REMOTE_SESSION_TIMEOUT_SEC;
+    }
+
+    /**
+     * Returns a list of alive client targets (authenticated or whitelisted + has port + recently seen).
+     * Each entry: ['ip' => string, 'port' => int]
+     */
+    private function GetAliveClientTargets(): array
+    {
+        $sessions = $this->readSessions();
+
+        $whitelistConfig = json_decode($this->ReadPropertyString('ip_whitelist'), true);
+        $ipWhitelist = array_column($whitelistConfig ?? [], 'ip');
+
+        $targets = [];
+        foreach ($sessions as $ip => $info) {
+            $auth = (bool)($info['authenticated'] ?? false);
+            $port = (int)($info['port'] ?? 0);
+            $whitelisted = in_array($ip, $ipWhitelist, true);
+
+            // Must be authenticated OR whitelisted, and must have a port.
+            if ((!$auth && !$whitelisted) || $port <= 0) {
+                continue;
+            }
+
+            // Must be alive (recently seen).
+            if (!$this->IsClientSessionAlive((array)$info)) {
+                continue;
+            }
+
+            $targets[] = ['ip' => (string)$ip, 'port' => $port];
+        }
+
+        return $targets;
+    }
+
+    private function HasAliveClients(): bool
+    {
+        return count($this->GetAliveClientTargets()) > 0;
+    }
+
     private function PushToRemoteClient(array $data, string $clientIP, int $clientPort): void
     {
         // Encode message to JSON
@@ -3108,7 +3187,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         return $first;
     }
 
-    private function RegisterMdnsService()
+    private function RegisterMdnsService(): void
     {
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '🔧 Registering DNS-SD service', 0);
 
@@ -3157,7 +3236,30 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         // NOTE: Most drivers use root path `/`. If you later introduce a dedicated endpoint, change this.
         $wsPath = '/';
+
+        // If we can determine a stable IPv4, publish a full ws_url.
+        // IMPORTANT (per UC docs): if ws_url is present, ws_path / wss / wss_port are ignored.
+        // So we must NOT publish ws_path in that case to avoid confusion.
         $wsUrl = ($ipv4 !== '') ? ('ws://' . $ipv4 . ':' . $servicePort . $wsPath) : '';
+
+        $txt = [
+            // Required by UC discovery docs
+            ['Value' => 'name=Symcon von ' . $first],
+            ['Value' => 'developer=Fonzo'],
+            ['Value' => 'ver=' . $this->GetModuleLibraryVersion()],
+
+            // Optional but useful
+            ['Value' => 'ver_api=' . self::Unfolded_Circle_API_Version],
+            ['Value' => 'pwd=true'],
+        ];
+
+        if ($wsUrl !== '') {
+            // ws_url overrides everything related to ws path/ssl
+            $txt[] = ['Value' => 'ws_url=' . $wsUrl];
+        } else {
+            // No stable IPv4 found → fall back to host/port discovery; publish ws_path only.
+            $txt[] = ['Value' => 'ws_path=' . $wsPath];
+        }
 
         $newEntry = [
             'Name' => $serviceName,
@@ -3165,23 +3267,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'Domain' => '',
             'Host' => '',
             'Port' => $servicePort,
-            'TXTRecords' => [
-                // Keep TXT minimal and stable. User can still edit it in the DNS-SD instance UI if desired.
-                ['Value' => 'name=Symcon von ' . $first],
-                ['Value' => 'ver=' . $this->GetModuleLibraryVersion()],
-                ['Value' => 'ver_api=' . self::Unfolded_Circle_API_Version],
-                ['Value' => 'developer=Fonzo'],
-                ['Value' => 'pwd=true'],
-                // Help the Remote select IPv4 by overriding the full websocket url.
-                // If we couldn't determine a stable IPv4, we omit ws_url and fall back to host/port discovery.
-                // ws_path is included for completeness.
-                ['Value' => 'ws_path=' . $wsPath],
-            ]
+            'TXTRecords' => $txt
         ];
-
-        if ($wsUrl !== '') {
-            $newEntry['TXTRecords'][] = ['Value' => 'ws_url=' . $wsUrl];
-        }
 
         $entries[] = $newEntry;
 
@@ -3199,8 +3286,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         $entries = json_decode(IPS_GetProperty($mdnsID, 'Services'), true) ?? [];
-        $filtered = array_filter($entries, function ($entry) {
-            return $entry['RegType'] !== '_uc-integration._tcp' || $entry['Name'] !== 'Symcon';
+        $serviceType = '_uc-integration._tcp';
+        $serviceName = (string)$this->GetDriverId();
+
+        $filtered = array_filter($entries, function ($entry) use ($serviceType, $serviceName) {
+            return ($entry['RegType'] ?? '') !== $serviceType || ($entry['Name'] ?? '') !== $serviceName;
         });
 
         IPS_SetProperty($mdnsID, 'Services', json_encode(array_values($filtered)));
@@ -4365,12 +4455,18 @@ class Remote3IntegrationDriver extends IPSModuleStrict
      */
     private function SendEntityChange(string $entityId, string $entityType, array $attributes): void
     {
+        $targets = $this->GetAliveClientTargets();
+        if (count($targets) === 0) {
+            // Nobody alive -> do nothing, no logs.
+            return;
+        }
+
         // For light entities, if color_var_id is available, add hue/saturation from hex color
         if ($entityType === 'light') {
             $lightMapping = json_decode($this->ReadPropertyString('light_mapping'), true);
             if (is_array($lightMapping)) {
                 foreach ($lightMapping as $entry) {
-                    if ('light_' . $entry['switch_var_id'] === $entityId) {
+                    if ('light_' . ($entry['switch_var_id'] ?? '') === $entityId) {
                         if (!empty($entry['color_var_id']) && @IPS_VariableExists($entry['color_var_id'])) {
                             $hex = @GetValue($entry['color_var_id']);
                             $hs = $this->ConvertHexColorToHueSaturation((int)$hex);
@@ -4382,6 +4478,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 }
             }
         }
+
         $event = [
             'kind' => 'event',
             'msg' => 'entity_change',
@@ -4393,22 +4490,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'cat' => 'ENTITY'
         ];
 
-        $sessions = json_decode($this->ReadAttributeString('client_sessions'), true) ?? [];
-        $whitelistConfig = json_decode($this->ReadPropertyString('ip_whitelist'), true);
-        $ipWhitelist = array_column($whitelistConfig ?? [], 'ip');
-
-        foreach ($sessions as $ip => $info) {
-            $auth = $info['authenticated'] ?? false;
-            $sub = $info['subscribed'] ?? false;
-            $port = $info['port'] ?? 0;
-            $whitelisted = in_array($ip, $ipWhitelist);
-
-            if ((!$auth && !$whitelisted) || !$port) {
-                continue;
-            }
-
+        foreach ($targets as $t) {
+            $ip = $t['ip'];
+            $port = (int)$t['port'];
             $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Sending entity_change for $entityId to $ip:$port", 0);
-            $this->PushToRemoteClient($event, $ip, (int)$port);
+            $this->PushToRemoteClient($event, $ip, $port);
         }
     }
 
@@ -4421,6 +4507,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
     public function SendEntityStateUpdate(int $varId): void
     {
+        // If no Remote client is currently alive, do nothing (prevents log spam and unnecessary work).
+        if (!$this->HasAliveClients()) {
+            return;
+        }
+
         // $this->SendDebug(__FUNCTION__, "🔄 Aktualisiere Zustand für VarID: $varId", 0);
 
         // 1. Switches
@@ -4747,18 +4838,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
      */
     private function BroadcastEventToClients(array $event): void
     {
-        $sessions = json_decode($this->ReadAttributeString('client_sessions'), true) ?? [];
-        $whitelistConfig = json_decode($this->ReadPropertyString('ip_whitelist'), true);
-        $ipWhitelist = array_column($whitelistConfig ?? [], 'ip');
-        foreach ($sessions as $ip => $info) {
-            $auth = $info['authenticated'] ?? false;
-            $port = $info['port'] ?? 0;
-            $whitelisted = in_array($ip, $ipWhitelist);
-            if ((!$auth && !$whitelisted) || !$port) {
-                continue;
-            }
+        $targets = $this->GetAliveClientTargets();
+        if (count($targets) === 0) {
+            return;
+        }
+
+        foreach ($targets as $t) {
+            $ip = $t['ip'];
+            $port = (int)$t['port'];
             $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Sending event to $ip:$port", 0);
-            $this->PushToRemoteClient($event, $ip, (int)$port);
+            $this->PushToRemoteClient($event, $ip, $port);
         }
     }
 
@@ -4767,11 +4856,19 @@ class Remote3IntegrationDriver extends IPSModuleStrict
      */
     private function SendInitialOnlineEventsForAllClients(): void
     {
+        // Only send initial online events if at least one client is actually alive.
+        if (!$this->HasAliveClients()) {
+            return;
+        }
+
         $sessions = $this->readSessions();
         $whitelistConfig = json_decode($this->ReadPropertyString('ip_whitelist'), true);
         $ipWhitelist = array_column($whitelistConfig ?? [], 'ip');
 
         foreach ($sessions as $clientIP => $entry) {
+            if (!$this->IsClientSessionAlive((array)$entry)) {
+                continue;
+            }
             if (!is_array($entry) || !($entry['authenticated'] ?? false) || !isset($entry['port'])) {
                 // Auch Whitelist berücksichtigen
                 $whitelisted = in_array($clientIP, $ipWhitelist);
@@ -7548,7 +7645,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 'name' => 'token',
                 'caption' => '🔑 Token',
                 'value' => $token,
-                'enabled' => false
+                'enabled' => true
             ],
             [
                 'type' => 'PopupButton',

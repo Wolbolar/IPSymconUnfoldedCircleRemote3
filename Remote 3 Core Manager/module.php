@@ -331,6 +331,8 @@ class Remote3CoreManager extends IPSModuleStrict
                 return $this->CallGetEntities();
             case 'CallGetIntg':
                 return $this->CallGetIntg();
+            case 'CallGetIntgDiscover':
+                return $this->CallGetIntgDiscover();
             default:
                 $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_WS, "⚠️ Unbekannte Methode: $method", 0);
                 return json_encode(['error' => 'Unbekannte Methode']);
@@ -622,7 +624,8 @@ class Remote3CoreManager extends IPSModuleStrict
             'CallGetSoundConfig',
             'CallGetRemotes',
             'CallGetEntities',
-            'CallGetIntg'
+            'CallGetIntg',
+            'CallGetIntgDiscover'
         ];
 
         if (!in_array($method, $allowed, true) || !method_exists($this, $method)) {
@@ -751,8 +754,11 @@ class Remote3CoreManager extends IPSModuleStrict
             CURLOPT_TIMEOUT => 10
         ];
 
-        if (in_array(strtoupper($method), ['POST', 'PUT']) && !empty($params)) {
-            $options[CURLOPT_POSTFIELDS] = json_encode($params);
+        if (in_array(strtoupper($method), ['POST', 'PUT'])) {
+            // The Core API expects a JSON body for PUT/POST in many endpoints.
+            // Sending no body at all can result in: "Json deserialize error: EOF while parsing a value".
+            // Therefore always send at least an empty object.
+            $options[CURLOPT_POSTFIELDS] = !empty($params) ? json_encode($params) : '{}';
         }
 
         curl_setopt_array($ch, $options);
@@ -876,8 +882,10 @@ class Remote3CoreManager extends IPSModuleStrict
         // Therefore params must be passed as JSON string.
         $payload = [];
 
-        if (trim($params) !== '') {
-            $decoded = json_decode($params, true);
+        // Allow empty params for GET. For PUT/POST we will still send `{}` in SendRestRequest().
+        $paramsTrim = trim($params);
+        if ($paramsTrim !== '' && $paramsTrim !== '{}') {
+            $decoded = json_decode($paramsTrim, true);
             if (is_array($decoded)) {
                 $payload = $decoded;
             } else {
@@ -1021,7 +1029,18 @@ class Remote3CoreManager extends IPSModuleStrict
     protected function CallGetIntg(): false|string
     {
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_API, '⏳ Requesting /intg...', 0);
-        $response = $this->SendRestRequest('GET', '/entities');
+        $response = $this->SendRestRequest('GET', '/intg');
+        return $this->CeckResponse($response);
+    }
+
+    /**
+     * Get discovered integration drivers.
+     * Core API: GET /api/intg/discover
+     */
+    protected function CallGetIntgDiscover(): false|string
+    {
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_API, '⏳ Requesting /intg/discover...', 0);
+        $response = $this->SendRestRequest('GET', '/intg/discover');
         return $this->CeckResponse($response);
     }
 
@@ -1621,6 +1640,12 @@ class Remote3CoreManager extends IPSModuleStrict
                 'caption' => 'Refresh all data',
                 'icon' => 'refresh',
                 'onClick' => 'UCR_RefreshAllData($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Get intg discover',
+                'icon' => 'magnifier',
+                'onClick' => 'echo UCR_CallApi($id, "GET", "/intg/discover", "");'
             ]
         ];
         return $form;

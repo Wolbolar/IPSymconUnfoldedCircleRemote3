@@ -754,14 +754,14 @@ class UcrApiHelper
         if ($hostRaw === '') {
             $msg = 'Host is missing.';
             $this->dbg(__FUNCTION__, '❌ ' . $msg, 0, 'API', 0);
-            return json_encode(['success' => false, 'message' => $msg]);
+            return json_encode(['success' => false, 'message' => $msg], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         $baseUrl = $this->BuildRemoteBaseUrl($host);
         if ($baseUrl === '') {
             $msg = 'Host is invalid after normalization.';
             $this->dbg(__FUNCTION__, '❌ ' . $msg, 0, 'API', 0);
-            return json_encode(['success' => false, 'message' => $msg]);
+            return json_encode(['success' => false, 'message' => $msg], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         $this->dbg(__FUNCTION__, '🌐 Icon upload baseUrl=' . $baseUrl . ' (raw host=' . $hostRaw . ', rest host=' . $host . ')', 0, 'API', 0);
@@ -775,29 +775,59 @@ class UcrApiHelper
         if (!$this->EnsureApiKey()) {
             $msg = 'API key missing or could not be created.';
             $this->dbg(__FUNCTION__, '❌ ' . $msg, 0, 'API', 0);
-            return json_encode(['success' => false, 'message' => $msg]);
+            return json_encode(['success' => false, 'message' => $msg], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         $apiKey = $this->CtxReadAttrString('api_key');
         if ($apiKey === '') {
             $msg = 'API key is empty.';
             $this->dbg(__FUNCTION__, '❌ ' . $msg, 0, 'API', 0);
-            return json_encode(['success' => false, 'message' => $msg]);
+            return json_encode(['success' => false, 'message' => $msg], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
+        // --- Resolve icon path (keep it simple & deterministic) ---
+        // Preferred location: /imgs/symcon_icon.png
+        $moduleRoot = dirname(__DIR__); // .../com.unfoldedcircle.remote3
+
+        // Preferred location: /imgs/symcon_icon.png
+        $imgIcon = $moduleRoot . DIRECTORY_SEPARATOR . 'imgs' . DIRECTORY_SEPARATOR . 'symcon_icon.png';
+
+        // Symcon can run modules from the store path as well. Add deterministic fallback locations.
+        $kernelDir = rtrim(IPS_GetKernelDir(), "\\/ ");
+        $storeImgIcon = ($kernelDir !== '')
+            ? ($kernelDir . DIRECTORY_SEPARATOR . 'modules' . DIRECTORY_SEPARATOR . '.store' . DIRECTORY_SEPARATOR . 'com.unfoldedcircle.remote3' . DIRECTORY_SEPARATOR . 'imgs' . DIRECTORY_SEPARATOR . 'symcon_icon.png')
+            : '';
+        $kernelImgIcon = ($kernelDir !== '')
+            ? ($kernelDir . DIRECTORY_SEPARATOR . 'modules' . DIRECTORY_SEPARATOR . 'com.unfoldedcircle.remote3' . DIRECTORY_SEPARATOR . 'imgs' . DIRECTORY_SEPARATOR . 'symcon_icon.png')
+            : '';
+
+        // Legacy/dev location (should NOT be used anymore)
+        $libsIcon = $moduleRoot . DIRECTORY_SEPARATOR . 'libs' . DIRECTORY_SEPARATOR . 'symcon_icon.png';
+
+        // Only use imgs/ as source of truth. libs/ is logged as a warning if present.
         $candidates = [
-            __DIR__ . '/../imgs/symcon_icon.png',          // libs -> imgs
-            dirname(__DIR__) . '/imgs/symcon_icon.png',    // module root -> imgs
+            $imgIcon,
         ];
+        if ($storeImgIcon !== '') {
+            $candidates[] = $storeImgIcon;
+        }
+        if ($kernelImgIcon !== '') {
+            $candidates[] = $kernelImgIcon;
+        }
+
+        if (is_file($libsIcon)) {
+            $this->dbg(__FUNCTION__, '⚠️ Found legacy icon in libs/ (will be ignored). Please delete: ' . $libsIcon, 0, 'API', 0);
+        }
 
         $this->dbg(__FUNCTION__, 'KernelDir=' . IPS_GetKernelDir(), 0, 'API', 0);
+        $this->dbg(__FUNCTION__, 'storeImgIcon=' . $storeImgIcon . ' | kernelImgIcon=' . $kernelImgIcon, 0, 'API', 0);
         $this->dbg(__FUNCTION__, '__DIR__=' . __DIR__, 0, 'API', 0);
+        $this->dbg(__FUNCTION__, 'moduleRoot=' . $moduleRoot, 0, 'API', 0);
 
         $filePath = '';
         foreach ($candidates as $p) {
             $rp = realpath($p);
             $this->dbg(__FUNCTION__, 'Icon candidate=' . $p . ' | realpath=' . ($rp ?: 'false'), 0, 'API', 0);
-
             if ($rp !== false && is_file($rp)) {
                 $filePath = $rp;
                 break;
@@ -807,12 +837,14 @@ class UcrApiHelper
         if ($filePath === '') {
             $msg = 'Icon file not found. Checked: ' . implode(' | ', $candidates);
             $this->dbg(__FUNCTION__, '❌ ' . $msg, 0, 'API', 0);
-            return json_encode(['success' => false, 'message' => $msg]);
+            return json_encode(['success' => false, 'message' => $msg], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         $this->dbg(__FUNCTION__, '✅ Icon resolved path: ' . $filePath, 0, 'API', 0);
 
 
+        // Remote 3 firmware v0.69.1-bt exposes icon resources under /api/resources.
+        // Keep this deterministic to avoid a 404+retry roundtrip.
         $url = $baseUrl . '/api/resources/Icon';
         $this->dbg(__FUNCTION__, 'POST ' . $url, 0, 'API', 0);
 
@@ -822,8 +854,10 @@ class UcrApiHelper
             'Authorization: Bearer ' . $apiKey
         ];
 
+        // Force a clean, deterministic filename on the Remote.
+        // The Remote normalizes the uploaded filename and uses it as resource identifier.
         $postFields = [
-            'file' => new CURLFile($filePath)
+            'file' => new CURLFile($filePath, 'image/png', 'symcon_icon.png')
         ];
 
         $curlOpts = [
@@ -859,20 +893,21 @@ class UcrApiHelper
         $this->dbg(__FUNCTION__, 'HTTP ' . $httpCode, 0, 'API', 0);
         if ($err !== '') {
             $this->dbg(__FUNCTION__, '❌ CURL Error: ' . $err, 0, 'API', 0);
-            return json_encode(['success' => false, 'message' => $err]);
+            return json_encode(['success' => false, 'message' => $err], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         $this->dbg(__FUNCTION__, 'Response: ' . (string)$resp, 0, 'API', 0);
 
+
         if ($httpCode < 200 || $httpCode >= 300) {
-            return json_encode(['success' => false, 'message' => 'Upload failed', 'httpCode' => $httpCode, 'response' => (string)$resp]);
+            return json_encode(['success' => false, 'message' => 'Upload failed', 'httpCode' => $httpCode, 'response' => (string)$resp], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         $decoded = json_decode((string)$resp, true);
         if (is_array($decoded)) {
-            return json_encode(['success' => true, 'httpCode' => $httpCode, 'data' => $decoded]);
+            return json_encode(['success' => true, 'httpCode' => $httpCode, 'data' => $decoded], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
-        return json_encode(['success' => true, 'httpCode' => $httpCode, 'response' => (string)$resp]);
+        return json_encode(['success' => true, 'httpCode' => $httpCode, 'response' => (string)$resp], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 }
