@@ -1816,7 +1816,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '💾 Stored Remote PIN in attribute web_config_pass', 0);
 
             // Determine remote host (fallback to client IP via REST resolver)
-            $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+            $remoteHost = GetEffectiveRemoteHost(); 
 
             // IMMER neu resolven (auch wenn remote_host schon gesetzt ist)
             // bevorzugt IPv4 via remote_directory
@@ -1846,7 +1846,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             // ✅ API-Key vorhanden -> Token automatisch setzen
             $tokenStored = trim((string)$this->ReadAttributeString('token'));
-            $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+            $remoteHost = GetEffectiveRemoteHost(); 
             if ($remoteHost === '') {
                 $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
                 if ($remoteHost !== '') {
@@ -1897,7 +1897,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         // Token accepted. Try to push/register the token to the Remote via REST so the Remote marks it as configured.
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token accepted → attempting REST registration with token', 0);
 
-        $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+        $remoteHost = GetEffectiveRemoteHost(); 
         if ($remoteHost === '') {
             $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
             if ($remoteHost !== '') {
@@ -2723,8 +2723,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->EnsureTokenInitialized();
         $token = (string)$this->ReadAttributeString('token');
 
-        $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
-        if ($remoteHost === '') {
+        //$remoteHost = GetEffectiveRemoteHost(); 
+        $remoteHost = GetEffectiveRemoteHost(); 
             $remoteHost = trim($clientIP);
             if ($remoteHost !== '') {
                 $this->WriteAttributeString('remote_host', $remoteHost);
