@@ -1834,7 +1834,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '💾 Stored Remote PIN in attribute web_config_pass', 0);
 
             // Determine remote host (fallback to client IP via REST resolver)
-            $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+            $remoteHost = $this->GetEffectiveRemoteHost();
 
             // IMMER neu resolven (auch wenn remote_host schon gesetzt ist)
             // bevorzugt IPv4 via remote_directory
@@ -1864,7 +1864,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             // ✅ API-Key vorhanden -> Token automatisch setzen
             $tokenStored = trim((string)$this->ReadAttributeString('token'));
-            $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+            $remoteHost = $this->GetEffectiveRemoteHost();
             if ($remoteHost === '') {
                 $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
                 if ($remoteHost !== '') {
@@ -1915,10 +1915,12 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         // Token accepted. Try to push/register the token to the Remote via REST so the Remote marks it as configured.
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '✅ Token accepted → attempting REST registration with token', 0);
 
-        $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
-        if ($remoteHost === '') {
-            $remoteHost = $this->ResolveRemoteHostForRest($clientIP);
-            if ($remoteHost !== '') {
+        $remoteHost = $this->GetEffectiveRemoteHost();
+        $candidate = $remoteHost !== '' ? $remoteHost : $clientIP;
+        $resolved = $this->ResolveRemoteHostForRest($candidate);
+        if ($resolved !== '') {
+            $remoteHost = $resolved;
+            if (!$this->IsManualHostEnabled()) {
                 $this->WriteAttributeString('remote_host', $remoteHost);
             }
         }
@@ -2588,6 +2590,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔑 Updating driver token via REST: PATCH /api/intg/drivers/' . $driverId, 0);
         $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_SETUP, '🔑 Driver token update body: ' . (string)$body, 0);
 
+        $remoteHost = $this->FormatRemoteHostForHttpUrl($remoteHost);
         $url = "http://{$remoteHost}/api/intg/drivers/" . rawurlencode($driverId);
 
         $ch = curl_init($url);
@@ -2638,6 +2641,36 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     }
 
     /**
+     * Formats a Remote host for use inside an HTTP URL.
+     *
+     * Handles:
+     * - IPv6 zone IDs (e.g. fe80::1%eth0 -> fe80::1%25eth0)
+     * - IPv6 URL bracket notation (e.g. fe80::1 -> [fe80::1])
+     *
+     * IMPORTANT: Expects host only (no scheme). If the input already starts with '[', it is left as-is.
+     */
+    private function FormatRemoteHostForHttpUrl(string $remoteHost): string
+    {
+        $remoteHost = trim($remoteHost);
+        if ($remoteHost === '') {
+            return '';
+        }
+
+        // Encode IPv6 zone id for URLs: fe80::1%eth0 -> fe80::1%25eth0
+        if (str_contains($remoteHost, '%')) {
+            $remoteHost = str_replace('%', '%25', $remoteHost);
+        }
+
+        // Wrap IPv6 literals in brackets for URLs.
+        // Heuristic: IPv6 contains at least 2 ':' and is not already bracketed.
+        if ((substr_count($remoteHost, ':') >= 2) && !str_starts_with($remoteHost, '[')) {
+            $remoteHost = '[' . $remoteHost . ']';
+        }
+
+        return $remoteHost;
+    }
+
+    /**
      * Reads the current integration driver configuration from the Remote via REST.
      * Used to check whether a token is already set.
      */
@@ -2654,6 +2687,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         $driverId = (string)$this->GetDriverId();
+
+        $remoteHost = $this->FormatRemoteHostForHttpUrl($remoteHost);
+
         $url = "http://{$remoteHost}/api/intg/drivers/" . rawurlencode($driverId);
 
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_SETUP, '🔎 Reading driver config via REST: GET /api/intg/drivers/' . $driverId, 0);
@@ -2728,10 +2764,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->EnsureTokenInitialized();
         $token = (string)$this->ReadAttributeString('token');
 
-        $remoteHost = trim((string)$this->ReadAttributeString('remote_host'));
+        $remoteHost = $this->GetEffectiveRemoteHost();
         if ($remoteHost === '') {
             $remoteHost = trim($clientIP);
-            if ($remoteHost !== '') {
+        }
+
+        $candidate = $remoteHost !== '' ? $remoteHost : $clientIP;
+        $resolved = $this->ResolveRemoteHostForRest($candidate);
+        if ($resolved !== '') {
+            $remoteHost = $resolved;
+            if (!$this->IsManualHostEnabled()) {
                 $this->WriteAttributeString('remote_host', $remoteHost);
             }
         }
