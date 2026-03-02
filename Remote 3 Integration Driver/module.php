@@ -2725,6 +2725,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         //$remoteHost = $this->GetEffectiveRemoteHost(); 
         $remoteHost = $this->GetEffectiveRemoteHost(); 
+        if ($remoteHost === '') {
             $remoteHost = trim($clientIP);
             if ($remoteHost !== '') {
                 $this->WriteAttributeString('remote_host', $remoteHost);
