@@ -1708,7 +1708,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
     public function GetDriverId(): string
     {
-        return 'uc.symcon.' . $this->GetStableSystemId() . '.main';
+        return $this->GetStableSystemId() . '.symcon';
     }
 
     private function SendDriverMetadata(string $clientIP, int $clientPort, int $reqId): void
