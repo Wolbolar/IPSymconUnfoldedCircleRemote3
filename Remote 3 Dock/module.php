@@ -121,14 +121,11 @@ class Remote3Dock extends IPSModuleStrict
         // Populate variables with last known values (e.g. after restart / form reload)
         $this->UpdateVariablesFromAttributes(false);
 
-        // Update instance status (prevents "Instanz wurde nicht erstellt" / IS_CREATING lingering)
+        // Update instance status:
+        // If we have a parent connection, consider this instance created/active.
+        // Runtime communication problems are handled separately (e.g. by request results / debug), not by blocking creation.
         $parentId = IPS_GetInstance($this->InstanceID)['ConnectionID'] ?? 0;
-        if ($parentId <= 0) {
-            $this->SetStatus(IS_INACTIVE);
-        } else {
-            $parent = IPS_GetInstance((int)$parentId);
-            $this->SetStatus(((int)($parent['InstanceStatus'] ?? IS_INACTIVE) === IS_ACTIVE) ? IS_ACTIVE : IS_INACTIVE);
-        }
+        $this->SetStatus(($parentId > 0) ? IS_ACTIVE : IS_INACTIVE);
     }
 
     /**
