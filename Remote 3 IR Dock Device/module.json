@@ -1,0 +1,16 @@
+{
+  "id": "{510ED85B-6806-3B16-AD34-36DCBE2E2D52}",
+  "name": "Remote 3 IR Dock Device",
+  "type": 3,
+  "vendor": "Unfolded Circle",
+  "aliases": [],
+  "parentRequirements": [
+    "{F975667E-3B5A-0148-4A47-CB4CD513EAD8}"
+  ],
+  "childRequirements": [],
+  "implemented": [
+    "{B65C3047-2C25-5859-A9D6-7408B791CDCD}"
+  ],
+  "prefix": "UCD",
+  "url": "https://www.unfoldedcircle.com"
+}

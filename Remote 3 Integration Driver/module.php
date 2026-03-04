@@ -1755,12 +1755,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 ],
                 'icon' => 'custom:symcon_icon.png',
                 'description' => $descriptions,
+                /*
                 'features' => [
                     [
                         'name' => 'auth.external_tokens',
                         'required' => true
                     ]
                 ],
+                */
                 'port' => 9988,
                 'developer' => [
                     'name' => 'Fonzo',

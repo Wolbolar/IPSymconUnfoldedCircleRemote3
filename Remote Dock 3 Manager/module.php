@@ -39,14 +39,18 @@ class Remote3DockManager extends IPSModuleStrict
         // We store that token in `api_key` attribute for reuse.
 
         // 1) Manual override from property (user editable in form) has priority.
-        //    Keep attribute in sync so all send/auth logic uses the latest value.
-        $manualApiKey = trim($this->ReadPropertyString('api_key_display'));
+        //    Keep attribute in sync so all send/auth logic uses the latest value
+
+        $manualPin = trim($this->ReadPropertyString('pin'));
+        $legacyManual = trim($this->ReadPropertyString('api_key_display')); // backward compatibility
+        $manualApiKey = $manualPin !== '' ? $manualPin : $legacyManual;
+
         $apiKey = $this->ReadAttributeString('api_key');
 
         if ($manualApiKey !== '') {
             if ($manualApiKey !== $apiKey) {
                 $this->WriteAttributeString('api_key', $manualApiKey);
-                $this->SendDebug(__FUNCTION__, '🔁 Sync API key: property -> attribute (EnsureApiKey).', 0);
+                $this->SendDebug(__FUNCTION__, '🔁 Sync PIN key: property -> attribute (EnsureApiKey).', 0);
             }
             return true;
         }
@@ -150,8 +154,11 @@ class Remote3DockManager extends IPSModuleStrict
         $this->RegisterAttributeString('ws_api_key', '');
         $this->RegisterAttributeString('sysinfo_raw', '');
         $this->RegisterAttributeString('sysinfo_last_req_id', '');
+        $this->RegisterAttributeString('port_modes_raw', '');
+        $this->RegisterAttributeInteger('port_modes_last_req_id', 0);
         $this->RegisterAttributeInteger('dock_msg_id', 0);
         $this->RegisterPropertyString('api_key_display', '');
+        $this->RegisterPropertyString('pin', '');
 
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
@@ -514,6 +521,12 @@ class Remote3DockManager extends IPSModuleStrict
         $this->SendDockCommand($command);
     }
 
+    /** Identify the dock: blink status LED green, amber, blue and red. */
+    public function Identify(): void
+    {
+        $this->SystemCommand('identify');
+    }
+
     /** Get system information (no authentication required). */
     public function GetSysInfo(): void
     {
@@ -580,12 +593,23 @@ class Remote3DockManager extends IPSModuleStrict
      */
     public function SetBrightness(int $ledBrightness, int $ethernetLedBrightness = -1): void
     {
+        // Symcon side uses percent (0..100). Dock API expects raw brightness values 0..255.
+        $pct = max(0, min(100, $ledBrightness));
+        $status = (int)round($pct * 255 / 100);
+
         $fields = [
-            'led_brightness' => $ledBrightness
+            // Dock API schema: setBrightnessMsg
+            // fields: status_led (0..255) and optional eth_led (0..255)
+            'status_led' => $status
         ];
+
         if ($ethernetLedBrightness >= 0) {
-            $fields['eth_led_brightness'] = $ethernetLedBrightness;
+            $pctEth = max(0, min(100, $ethernetLedBrightness));
+            $eth = (int)round($pctEth * 255 / 100);
+            $fields['eth_led'] = $eth;
         }
+
+        $this->SendDebug(__FUNCTION__, '➡️ set_brightness (Dock API) fields: ' . json_encode($fields, JSON_UNESCAPED_SLASHES), 0);
         $this->SendDockCommand('set_brightness', $fields);
     }
 
@@ -618,6 +642,94 @@ class Remote3DockManager extends IPSModuleStrict
     public function GetPortModes(): void
     {
         $this->SendDockCommand('get_port_modes');
+    }
+
+    /**
+     * Get cached port modes from attribute.
+     *
+     * @return array|null
+     */
+    private function GetCachedPortModes(): ?array
+    {
+        $raw = trim($this->ReadAttributeString('port_modes_raw'));
+        if ($raw === '') {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * Build rows for the form List control.
+     *
+     * @return array
+     */
+    private function BuildPortModesListValues(): array
+    {
+        $data = $this->GetCachedPortModes();
+        if (!is_array($data)) {
+            return [];
+        }
+
+        $ports = $data['ports'] ?? null;
+        if (!is_array($ports)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($ports as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $supported = $p['supported_modes'] ?? [];
+            if (!is_array($supported)) {
+                $supported = [];
+            }
+
+            $rows[] = [
+                'port' => (int)($p['port'] ?? 0),
+                'mode' => (string)($p['mode'] ?? ''),
+                'active_mode' => (string)($p['active_mode'] ?? ''),
+                'supported_modes' => implode(', ', array_map('strval', $supported))
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Request port modes and wait (best-effort) for a response.
+     * This enables calling from scripts where the response arrives asynchronously via ReceiveData.
+     *
+     * @param int $timeoutMs
+     * @return string JSON (same structure as Dock response) or empty string on timeout.
+     */
+    public function GetPortModesAndWait(int $timeoutMs = 2000): string
+    {
+        $timeoutMs = max(0, $timeoutMs);
+
+        // Snapshot current req id so we can detect a newer response.
+        $beforeReqId = (int)$this->ReadAttributeInteger('port_modes_last_req_id');
+
+        // Trigger request
+        $this->GetPortModes();
+
+        if ($timeoutMs === 0) {
+            return '';
+        }
+
+        $deadline = microtime(true) + ($timeoutMs / 1000.0);
+        while (microtime(true) < $deadline) {
+            $afterReqId = (int)$this->ReadAttributeInteger('port_modes_last_req_id');
+            if ($afterReqId !== 0 && $afterReqId !== $beforeReqId) {
+                // We got a newer response
+                return (string)$this->ReadAttributeString('port_modes_raw');
+            }
+            IPS_Sleep(50);
+        }
+
+        $this->SendDebug(__FUNCTION__, '⏱️ Timeout waiting for get_port_modes response (' . $timeoutMs . 'ms).', 0);
+        return '';
     }
 
     /**
@@ -693,7 +805,10 @@ class Remote3DockManager extends IPSModuleStrict
     public function Authenticate(): void
     {
         // Prefer the editable property if present; keep attribute synced.
-        $prop = trim($this->ReadPropertyString('api_key_display'));
+        $prop = trim($this->ReadPropertyString('pin'));
+        if ($prop === '') {
+            $prop = trim($this->ReadPropertyString('api_key_display')); // backward compatibility
+        }
         if ($prop !== '') {
             $this->WriteAttributeString('api_key', $prop);
         }
@@ -727,6 +842,65 @@ class Remote3DockManager extends IPSModuleStrict
         }
     }
 
+    /**
+     * Low-level brightness setter that maps legacy percent fields or Dock API raw fields to the Dock API schema.
+     */
+    public function SetBrightnessFields(array $fields): void
+    {
+        $out = [];
+
+        // Accept percent (0..100) via legacy keys, OR raw values (0..255) via Dock API keys.
+
+        // Main status LED
+        if (array_key_exists('status_led', $fields)) {
+            $v = (int)$fields['status_led'];
+            if ($v >= 0) {
+                $out['status_led'] = max(0, min(255, $v));
+            }
+        } elseif (array_key_exists('led_brightness', $fields)) {
+            $pct = (int)$fields['led_brightness'];
+            if ($pct >= 0) {
+                $pct = max(0, min(100, $pct));
+                $out['status_led'] = (int)round($pct * 255 / 100);
+            }
+        }
+
+        // Ethernet LED
+        if (array_key_exists('eth_led', $fields)) {
+            $v = (int)$fields['eth_led'];
+            if ($v >= 0) {
+                $out['eth_led'] = max(0, min(255, $v));
+            }
+        } elseif (array_key_exists('eth_led_brightness', $fields)) {
+            $pct = (int)$fields['eth_led_brightness'];
+            if ($pct >= 0) {
+                $pct = max(0, min(100, $pct));
+                $out['eth_led'] = (int)round($pct * 255 / 100);
+            }
+        }
+
+        if (empty($out)) {
+            $this->SendDebug(__FUNCTION__, '⏸️ No valid brightness fields provided.', 0);
+            return;
+        }
+
+        $this->SendDebug(__FUNCTION__, '➡️ set_brightness (Dock API) fields: ' . json_encode($out, JSON_UNESCAPED_SLASHES), 0);
+        $this->SendDockCommand('set_brightness', $out);
+    }
+
+    /** Convenience: set only the main LED brightness. */
+    public function SetLedBrightness(int $ledBrightness): void
+    {
+        // Convenience: percent 0..100
+        $this->SetBrightnessFields(['led_brightness' => $ledBrightness]);
+    }
+
+    /** Convenience: set only the ethernet LED brightness. */
+    public function SetEthernetLedBrightness(int $ethernetLedBrightness): void
+    {
+        // Convenience: percent 0..100
+        $this->SetBrightnessFields(['eth_led_brightness' => $ethernetLedBrightness]);
+    }
 
     private function SendToWebSocket(array $payload): void
     {
@@ -793,6 +967,56 @@ class Remote3DockManager extends IPSModuleStrict
             return json_encode(['error' => 'Invalid Buffer']);
         }
 
+        // IR device payload from child (Remote3IRDockDevice)
+        // Example: {"type":"ir","codeFormat":"UC_HEX","repeat":1,"code":"..."}
+        $childType = (string)($buffer['type'] ?? '');
+        if ($childType === 'ir') {
+            $code = trim((string)($buffer['code'] ?? ''));
+            if ($code === '') {
+                return json_encode(['error' => 'Missing code']);
+            }
+
+            // Map child codeFormat to Dock API format
+            $cf = strtoupper(trim((string)($buffer['codeFormat'] ?? '')));
+            $format = 'hex';
+            if ($cf === 'PRONTO') {
+                $format = 'pronto';
+            } elseif ($cf === 'UC_HEX' || $cf === 'HEX') {
+                $format = 'hex';
+            }
+
+            $repeat = (int)($buffer['repeat'] ?? 0);
+            if ($repeat < 0) {
+                $repeat = 0;
+            }
+
+            // Optional Dock fields
+            $outputs = $buffer['outputs'] ?? [];
+            if (!is_array($outputs)) {
+                $outputs = [];
+            }
+            // Default: use internal emitters if caller didn't specify
+            if (empty($outputs)) {
+                $outputs = ['int_side' => true, 'int_top' => true];
+            }
+
+            $f = (int)($buffer['f'] ?? 0);
+            $hold = (int)($buffer['hold'] ?? 0);
+
+            $this->SendDebug(__FUNCTION__, '➡️ Child IR payload received. codeFormat=' . $cf . ' mappedFormat=' . $format . ' repeat=' . $repeat . ' outputs=' . json_encode($outputs), 0);
+
+            // Send via Dock WebSocket API
+            $this->IRSend($code, $format, $repeat, $outputs, $f, $hold);
+            // ACK to child: Dock will respond asynchronously over WS (forwarded via ReceiveData)
+            return json_encode([
+                'ok' => true,
+                'queued' => true,
+                'action' => 'ir_send',
+                'format' => $format,
+                'repeat' => $repeat
+            ], JSON_UNESCAPED_SLASHES);
+        }
+
         // New request style from Dock child: {"action":"get_sysinfo"}
         $action = (string)($buffer['action'] ?? '');
         if ($action !== '') {
@@ -802,7 +1026,120 @@ class Remote3DockManager extends IPSModuleStrict
                     // Trigger the actual WS request; response will arrive via ReceiveData and be forwarded to children.
                     $this->GetSysInfo();
                     return '';
+                case 'get_port_modes':
+                    // Trigger the actual WS request; response will arrive via ReceiveData and be forwarded to children.
+                    $this->GetPortModes();
+                    return '';
+                case 'authenticate':
+                    // Trigger Dock auth (token is stored in attribute/property)
+                    $this->Authenticate();
+                    return '';
 
+                case 'set_led_brightness':
+                    $value = (int)($buffer['value'] ?? $buffer['led_brightness'] ?? -1);
+                    if ($value < 0) {
+                        return json_encode(['error' => 'Missing value']);
+                    }
+                    $this->SetLedBrightness($value);
+                    return '';
+
+                case 'set_eth_led_brightness':
+                    $value = (int)($buffer['value'] ?? $buffer['eth_led_brightness'] ?? -1);
+                    if ($value < 0) {
+                        return json_encode(['error' => 'Missing value']);
+                    }
+                    $this->SetEthernetLedBrightness($value);
+                    return '';
+
+                case 'set_brightness':
+                    // Support both legacy percent keys and Dock API raw keys
+                    $payload = [];
+                    if (array_key_exists('led_brightness', $buffer) || array_key_exists('value', $buffer)) {
+                        $payload['led_brightness'] = (int)($buffer['led_brightness'] ?? $buffer['value'] ?? -1);
+                    }
+                    if (array_key_exists('eth_led_brightness', $buffer)) {
+                        $payload['eth_led_brightness'] = (int)$buffer['eth_led_brightness'];
+                    }
+                    // Allow passing raw Dock API fields directly
+                    if (array_key_exists('status_led', $buffer)) {
+                        $payload['status_led'] = (int)$buffer['status_led'];
+                    }
+                    if (array_key_exists('eth_led', $buffer)) {
+                        $payload['eth_led'] = (int)$buffer['eth_led'];
+                    }
+
+                    $this->SetBrightnessFields($payload);
+                    return '';
+
+                case 'set_volume':
+                    $value = (int)($buffer['value'] ?? $buffer['volume'] ?? -1);
+                    if ($value < 0) {
+                        return json_encode(['error' => 'Missing value']);
+                    }
+                    $this->SetVolume($value);
+                    return '';
+
+                case 'set_port_mode':
+                    $port = (int)($buffer['port'] ?? 0);
+                    $mode = (string)($buffer['mode'] ?? '');
+                    // Allow a compact numeric value mapping from child (0=AUTO, 1=NONE)
+                    if ($mode === '' && isset($buffer['value'])) {
+                        $mode = ((int)$buffer['value'] === 0) ? 'AUTO' : 'NONE';
+                    }
+                    if ($port <= 0 || $mode === '') {
+                        return json_encode(['error' => 'Missing port/mode']);
+                    }
+                    $uart = $buffer['uart'] ?? [];
+                    if (!is_array($uart)) {
+                        $uart = [];
+                    }
+                    $this->SetPortMode($port, $mode, $uart);
+                    return '';
+
+                case 'set_port_trigger':
+                    $port = (int)($buffer['port'] ?? 0);
+                    $enabled = (bool)($buffer['enabled'] ?? false);
+                    $pulse = (int)($buffer['pulse'] ?? 0);
+                    if ($port <= 0) {
+                        return json_encode(['error' => 'Missing port']);
+                    }
+                    $this->SetPortTrigger($port, $enabled, $pulse);
+                    return '';
+
+                case 'system_command':
+                    $cmd = (string)($buffer['command'] ?? $buffer['value'] ?? '');
+                    if (trim($cmd) === '') {
+                        return json_encode(['error' => 'Missing command']);
+                    }
+                    $this->SystemCommand($cmd);
+                    return '';
+
+                case 'ir_stop':
+                    $this->IRStop();
+                    return '';
+
+                case 'ir_send':
+                    $code = (string)($buffer['code'] ?? '');
+                    if (trim($code) === '') {
+                        return json_encode(['error' => 'Missing code']);
+                    }
+                    $format = (string)($buffer['format'] ?? 'hex');
+                    $repeat = (int)($buffer['repeat'] ?? 0);
+                    $outputs = $buffer['outputs'] ?? [];
+                    if (!is_array($outputs)) {
+                        $outputs = [];
+                    }
+                    $f = (int)($buffer['f'] ?? 0);
+                    $hold = (int)($buffer['hold'] ?? 0);
+                    $this->IRSend($code, $format, $repeat, $outputs, $f, $hold);
+                    // ACK to child: Dock will respond asynchronously over WS (forwarded via ReceiveData)
+                    return json_encode([
+                        'ok' => true,
+                        'queued' => true,
+                        'action' => 'ir_send',
+                        'format' => $format,
+                        'repeat' => $repeat
+                    ], JSON_UNESCAPED_SLASHES);
                 default:
                     $this->SendDebug(__FUNCTION__, '⚠️ Unknown action: ' . $action, 0);
                     return json_encode(['error' => 'Unknown action']);
@@ -933,6 +1270,33 @@ class Remote3DockManager extends IPSModuleStrict
             return '';
         }
 
+        // Dock port modes response: {"type":"dock","msg":"get_port_modes","ports":[...],"code":200,"req_id":7}
+        if (($payload['type'] ?? '') === 'dock' && ($payload['msg'] ?? '') === 'get_port_modes' && isset($payload['code']) && (int)$payload['code'] === 200) {
+            $this->SendDebug(__FUNCTION__, '🔌 Dock port modes received (dock/get_port_modes): ' . json_encode($payload), 0);
+
+            // Persist raw response for UI + script access
+            $this->WriteAttributeString('port_modes_raw', json_encode($payload, JSON_UNESCAPED_SLASHES));
+            if (isset($payload['req_id'])) {
+                $this->WriteAttributeInteger('port_modes_last_req_id', (int)$payload['req_id']);
+            }
+
+            // Forward to children (already forwarded globally above, but keep explicit for clarity)
+            $this->ForwardToChildren($payload);
+
+            if (method_exists($this, 'ReloadForm')) {
+                $this->ReloadForm();
+            }
+            return '';
+        }
+
+        // Dock IR send response: {"type":"dock","msg":"ir_send","code":200,"req_id":...}
+        if (($payload['type'] ?? '') === 'dock' && ($payload['msg'] ?? '') === 'ir_send') {
+            $this->SendDebug(__FUNCTION__, '📡 Dock ir_send response: ' . json_encode($payload), 0);
+            // Forward to children (already forwarded globally above, but keep explicit for clarity)
+            $this->ForwardToChildren($payload);
+            return '';
+        }
+
         // Dock system info response (expected after get_sysinfo)
         $type = (string)($payload['type'] ?? '');
         if ($type === 'sysinfo' || $type === 'get_sysinfo' || $type === 'sys_info' || $type === 'system' || $type === 'system_info') {
@@ -1058,8 +1422,8 @@ class Remote3DockManager extends IPSModuleStrict
 
             $form[] = [
                 'type' => 'ValidationTextBox',
-                'name' => 'api_key_display',
-                'caption' => 'API key',
+                'name' => 'pin',
+                'caption' => 'PIN',
                 'value' => $this->ReadAttributeString('api_key'),
                 'enabled' => true
             ];
@@ -1069,6 +1433,43 @@ class Remote3DockManager extends IPSModuleStrict
                 'caption' => 'Last sysinfo (raw JSON)',
                 'value' => $this->ReadAttributeString('sysinfo_raw'),
                 'enabled' => false
+            ];
+            $form[] = [
+                'type' => 'ExpansionPanel',
+                'caption' => 'Dock Ports (get_port_modes)',
+                'items' => [
+                    [
+                        'type' => 'Label',
+                        'caption' => 'Use the button "GetPortModes" (or "Request Dock sysinfo" + custom scripts) to refresh port data.'
+                    ],
+                    [
+                        'type' => 'List',
+                        'name' => 'port_modes_list',
+                        'caption' => 'Ports',
+                        'rowCount' => 6,
+                        'add' => false,
+                        'delete' => false,
+                        'sort' => [
+                            'column' => 'port',
+                            'direction' => 'ascending'
+                        ],
+                        'columns' => [
+                            ['caption' => 'Port', 'name' => 'port', 'width' => '60px'],
+                            ['caption' => 'Mode', 'name' => 'mode', 'width' => '90px'],
+                            ['caption' => 'Active', 'name' => 'active_mode', 'width' => '90px'],
+                            ['caption' => 'Supported modes', 'name' => 'supported_modes', 'width' => 'auto']
+                        ],
+                        'values' => $this->BuildPortModesListValues()
+                    ],
+                    [
+                        'type' => 'ValidationTextBox',
+                        'name' => 'port_modes_raw_display',
+                        'caption' => 'Last get_port_modes (raw JSON)',
+                        'value' => $this->ReadAttributeString('port_modes_raw'),
+                        'enabled' => false,
+                        'multiline' => true
+                    ]
+                ]
             ];
         } else {
             // Discovery setup: show all known properties read-only
@@ -1099,8 +1500,8 @@ class Remote3DockManager extends IPSModuleStrict
 
             $form[] = [
                 'type' => 'ValidationTextBox',
-                'name' => 'api_key_display',
-                'caption' => 'API key',
+                'name' => 'pin',
+                'caption' => 'PIN',
                 'enabled' => true
             ];
             $form[] = [
@@ -1109,6 +1510,43 @@ class Remote3DockManager extends IPSModuleStrict
                 'caption' => 'Last sysinfo (raw JSON)',
                 'value' => $this->ReadAttributeString('sysinfo_raw'),
                 'enabled' => false
+            ];
+            $form[] = [
+                'type' => 'ExpansionPanel',
+                'caption' => 'Dock Ports (get_port_modes)',
+                'items' => [
+                    [
+                        'type' => 'Label',
+                        'caption' => 'Use the button "GetPortModes" (or "Request Dock sysinfo" + custom scripts) to refresh port data.'
+                    ],
+                    [
+                        'type' => 'List',
+                        'name' => 'port_modes_list',
+                        'caption' => 'Ports',
+                        'rowCount' => 6,
+                        'add' => false,
+                        'delete' => false,
+                        'sort' => [
+                            'column' => 'port',
+                            'direction' => 'ascending'
+                        ],
+                        'columns' => [
+                            ['caption' => 'Port', 'name' => 'port', 'width' => '60px'],
+                            ['caption' => 'Mode', 'name' => 'mode', 'width' => '90px'],
+                            ['caption' => 'Active', 'name' => 'active_mode', 'width' => '90px'],
+                            ['caption' => 'Supported modes', 'name' => 'supported_modes', 'width' => 'auto']
+                        ],
+                        'values' => $this->BuildPortModesListValues()
+                    ],
+                    [
+                        'type' => 'ValidationTextBox',
+                        'name' => 'port_modes_raw_display',
+                        'caption' => 'Last get_port_modes (raw JSON)',
+                        'value' => $this->ReadAttributeString('port_modes_raw'),
+                        'enabled' => false,
+                        'multiline' => true
+                    ]
+                ]
             ];
         }
 
@@ -1141,8 +1579,18 @@ class Remote3DockManager extends IPSModuleStrict
             ],
             [
                 'type' => 'Button',
-                'caption' => 'Authenticate using API Key',
+                'caption' => 'Request Port Modes (get_port_modes)',
+                'onClick' => 'UCD_GetPortModes($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Authenticate using PIN',
                 'onClick' => 'UCD_Authenticate($id);'
+            ],
+            [
+                'type' => 'Button',
+                'caption' => 'Identify dock (blink LED)',
+                'onClick' => 'UCD_Identify($id);'
             ]
         ];
     }
@@ -1171,3 +1619,4 @@ class Remote3DockManager extends IPSModuleStrict
         return $form;
     }
 }
+
