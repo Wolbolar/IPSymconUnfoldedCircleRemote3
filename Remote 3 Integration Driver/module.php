@@ -210,7 +210,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     {
         //Never delete this line!
         parent::Destroy();
-        $this->UnregisterHook('/hook/unfoldedcircle');
+        $this->UnregisterHook('unfoldedcircle');
         $this->UnregisterMdnsService();
     }
 
@@ -224,7 +224,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
         //Only call this in READY state. On startup the WebHook instance might not be available yet
         if (IPS_GetKernelRunlevel() == KR_READY) {
-            $this->RegisterHook('/hook/unfoldedcircle');
+            $this->RegisterHook('unfoldedcircle');
             $this->RegisterMdnsService();
             $this->SetTimerInterval("PingDeviceState", 30000); // alle 30 Sekunden den Status senden
             $this->SetTimerInterval("UpdateAllEntityStates", 15000); // alle 15 Sekunden den Status senden
@@ -4470,7 +4470,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         if ($Message == IPS_KERNELMESSAGE && $Data[0] == KR_READY) {
             $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '✅ Kernel READY – sending initial events', 0);
-            $this->RegisterHook('/hook/unfoldedcircle');
+            $this->RegisterHook('unfoldedcircle');
             $this->RegisterMdnsService();
             $this->RefreshRemoteCores();
             $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_EXT, '🔁 Setting timer intervals: PingDeviceState=30s, UpdateAllEntityStates=15s', 0);

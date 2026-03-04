@@ -46,7 +46,13 @@
       "Last Command (Alias)": "Letzter Befehl (Alias)",
       "Last Command (Index)": "Letzter Befehl (Index)",
       "Last Sent (Time)": "Letzte Sendung (Zeit)",
-      "Current State (Alias)": "Aktueller Zustand (Alias)"
+      "Current State (Alias)": "Aktueller Zustand (Alias)",
+      "The IR codes learned on the Remote 3 can be viewed on the Remote 3 Webinterface.": "Die auf der Remote 3 gelernten IR-Codes können im Webinterface der Remote 3 angezeigt werden.",
+      "Export download link:": "Export-Download-Link:",
+      "Export download link: (create an export to generate the link)": "Export-Download-Link: (erst Export erstellen, um den Link zu erzeugen)",
+      "Export download link: (not available yet - Dock Manager download webhook missing)": "Export-Download-Link: (noch nicht verfügbar – Download-Webhook im Dock Manager fehlt)",
+      "Select Remote 3 CSV (learned IR codes)": "Remote 3 CSV wählen (gelernte IR-Codes)",
+      "Import Remote 3 CSV (learned codes)": "Remote 3 CSV importieren (gelernte Codes)"
     },
     "en": {
       "Device Type": "Device Type",
@@ -93,7 +99,13 @@
       "Last Command (Alias)": "Last Command (Alias)",
       "Last Command (Index)": "Last Command (Index)",
       "Last Sent (Time)": "Last Sent (Time)",
-      "Current State (Alias)": "Current State (Alias)"
+      "Current State (Alias)": "Current State (Alias)",
+      "The IR codes learned on the Remote 3 can be viewed on the Remote 3 Webinterface.": "The IR codes learned on the Remote 3 can be viewed on the Remote 3 Webinterface.",
+      "Export download link:": "Export download link:",
+      "Export download link: (create an export to generate the link)": "Export download link: (create an export to generate the link)",
+      "Export download link: (not available yet - Dock Manager download webhook missing)": "Export download link: (not available yet - Dock Manager download webhook missing)",
+      "Select Remote 3 CSV (learned IR codes)": "Select Remote 3 CSV (learned IR codes)",
+      "Import Remote 3 CSV (learned codes)": "Import Remote 3 CSV (learned codes)"
     },
     "fr": {
       "Device Type": "Type d’appareil",
@@ -140,7 +152,13 @@
       "Last Command (Alias)": "Dernière commande (alias)",
       "Last Command (Index)": "Dernière commande (index)",
       "Last Sent (Time)": "Dernier envoi (heure)",
-      "Current State (Alias)": "État actuel (alias)"
+      "Current State (Alias)": "État actuel (alias)",
+      "The IR codes learned on the Remote 3 can be viewed on the Remote 3 Webinterface.": "Les codes IR appris sur la Remote 3 peuvent être consultés dans l’interface Web de la Remote 3.",
+      "Export download link:": "Lien de téléchargement de l’export :",
+      "Export download link: (create an export to generate the link)": "Lien de téléchargement de l’export : (créez d’abord un export pour générer le lien)",
+      "Export download link: (not available yet - Dock Manager download webhook missing)": "Lien de téléchargement de l’export : (pas encore disponible – webhook de téléchargement manquant dans le Dock Manager)",
+      "Select Remote 3 CSV (learned IR codes)": "Sélectionner le CSV Remote 3 (codes IR appris)",
+      "Import Remote 3 CSV (learned codes)": "Importer le CSV Remote 3 (codes appris)"
     },
     "it": {
       "Device Type": "Tipo di dispositivo",
@@ -187,7 +205,13 @@
       "Last Command (Alias)": "Ultimo comando (alias)",
       "Last Command (Index)": "Ultimo comando (indice)",
       "Last Sent (Time)": "Ultimo invio (ora)",
-      "Current State (Alias)": "Stato attuale (alias)"
+      "Current State (Alias)": "Stato attuale (alias)",
+      "The IR codes learned on the Remote 3 can be viewed on the Remote 3 Webinterface.": "I codici IR appresi sulla Remote 3 possono essere visualizzati nell’interfaccia web della Remote 3.",
+      "Export download link:": "Link di download dell’export:",
+      "Export download link: (create an export to generate the link)": "Link di download dell’export: (crea prima un export per generare il link)",
+      "Export download link: (not available yet - Dock Manager download webhook missing)": "Link di download dell’export: (non ancora disponibile – webhook di download mancante nel Dock Manager)",
+      "Select Remote 3 CSV (learned IR codes)": "Seleziona CSV Remote 3 (codici IR appresi)",
+      "Import Remote 3 CSV (learned codes)": "Importa CSV Remote 3 (codici appresi)"
     },
     "es": {
       "Device Type": "Tipo de dispositivo",
@@ -234,7 +258,13 @@
       "Last Command (Alias)": "Último comando (alias)",
       "Last Command (Index)": "Último comando (índice)",
       "Last Sent (Time)": "Último envío (hora)",
-      "Current State (Alias)": "Estado actual (alias)"
+      "Current State (Alias)": "Estado actual (alias)",
+      "The IR codes learned on the Remote 3 can be viewed on the Remote 3 Webinterface.": "Los códigos IR aprendidos en la Remote 3 se pueden ver en la interfaz web de la Remote 3.",
+      "Export download link:": "Enlace de descarga de la exportación:",
+      "Export download link: (create an export to generate the link)": "Enlace de descarga de la exportación: (crea una exportación para generar el enlace)",
+      "Export download link: (not available yet - Dock Manager download webhook missing)": "Enlace de descarga de la exportación: (aún no disponible: falta el webhook de descarga en el Dock Manager)",
+      "Select Remote 3 CSV (learned IR codes)": "Seleccionar CSV de Remote 3 (códigos IR aprendidos)",
+      "Import Remote 3 CSV (learned codes)": "Importar CSV de Remote 3 (códigos aprendidos)"
     }
   }
 }

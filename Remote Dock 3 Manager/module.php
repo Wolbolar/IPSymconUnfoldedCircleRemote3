@@ -157,15 +157,32 @@ class Remote3DockManager extends IPSModuleStrict
         $this->RegisterAttributeString('port_modes_raw', '');
         $this->RegisterAttributeInteger('port_modes_last_req_id', 0);
         $this->RegisterAttributeInteger('dock_msg_id', 0);
+        $this->RegisterAttributeString('DownloadSecret', '');
         $this->RegisterPropertyString('api_key_display', '');
         $this->RegisterPropertyString('pin', '');
 
         //We need to call the RegisterHook function on Kernel READY
         $this->RegisterMessage(0, IPS_KERNELMESSAGE);
+
+        // Ensure a per-instance secret exists for export downloads
+        if ($this->ReadAttributeString('DownloadSecret') === '') {
+            try {
+                $this->WriteAttributeString('DownloadSecret', bin2hex(random_bytes(16)));
+            } catch (Throwable $e) {
+                // Fallback if random_bytes is not available
+                $this->WriteAttributeString('DownloadSecret', md5((string)microtime(true) . ':' . (string)$this->InstanceID));
+            }
+        }
     }
 
     public function Destroy(): void
     {
+        // Debug-Information zur Überprüfung, dass Destroy aufgerufen wird
+        $this->SendDebug('Destroy', 'Destroy-Methode wird aufgerufen', 0);
+
+        // Webhook löschen, falls dieser existiert
+        $this->UnregisterHook('unfoldedcircle_dock3/' . $this->InstanceID . '/download');
+
         //Never delete this line!
         parent::Destroy();
     }
@@ -190,6 +207,11 @@ class Remote3DockManager extends IPSModuleStrict
 
         $currentWsPort = (string)$this->ReadPropertyString('ws_port');
         $currentWsPath = (string)$this->ReadPropertyString('ws_path');
+
+        //Only call this in READY state. On startup the WebHook instance might not be available yet
+        if (IPS_GetKernelRunlevel() == KR_READY) {
+            $this->RegisterHook('unfoldedcircle_dock3/' . $this->InstanceID . '/download');
+        }
 
         // Only write properties when they differ to avoid ApplyChanges loops.
         $needSync = false;
@@ -1015,6 +1037,8 @@ class Remote3DockManager extends IPSModuleStrict
                 'format' => $format,
                 'repeat' => $repeat
             ], JSON_UNESCAPED_SLASHES);
+        } elseif ($childType === 'getDownloadUrl') {
+            return $this->HandleGetDownloadUrl($buffer);
         }
 
         // New request style from Dock child: {"action":"get_sysinfo"}
@@ -1338,8 +1362,291 @@ class Remote3DockManager extends IPSModuleStrict
         //Never delete this line!
         parent::MessageSink($TimeStamp, $SenderID, $Message, $Data);
         if ($Message == IPS_KERNELMESSAGE && $Data[0] == KR_READY) {
-            $this->SendDebug(__FUNCTION__, 'Kernel READY', 0);
+            $this->SendDebug(__FUNCTION__, '✅ Kernel READY – sende Initial-Events', 0);
+            $this->RegisterHook('unfoldedcircle_dock3/' . $this->InstanceID . '/download');
         }
+    }
+
+    /**
+     * WebHook handler (download exported files from /media subfolder).
+     *
+     * URL pattern:
+     *   /hook/unfoldedcircle_dock3/<InstanceID>/download?file=<filename>&token=<secret>
+     */
+    public function ProcessHookData(): void
+    {
+        $uri = (string)($_SERVER['REQUEST_URI'] ?? '');
+        $qs = (string)($_SERVER['QUERY_STRING'] ?? '');
+        $this->SendDebug('WEBHOOK', 'QUERY_STRING=' . $qs, 0);
+        // Some Symcon environments do not include the query string in REQUEST_URI.
+        // Therefore we primarily rely on $_GET for parameters.
+        $this->SendDebug('WEBHOOK', 'GET=' . json_encode($_GET, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 0);
+        // --- Debug: incoming request overview (do NOT leak full token/secret) ---
+        $this->SendDebug('WEBHOOK', 'REQUEST_URI=' . $uri, 0);
+        $this->SendDebug('WEBHOOK', 'SERVER_ADDR=' . ((string)($_SERVER['SERVER_ADDR'] ?? '')) . ' REMOTE_ADDR=' . ((string)($_SERVER['REMOTE_ADDR'] ?? '')), 0);
+        $this->SendDebug('WEBHOOK', 'HTTPS=' . ((string)($_SERVER['HTTPS'] ?? '')) . ' HTTP_HOST=' . ((string)($_SERVER['HTTP_HOST'] ?? '')) . ' SERVER_PORT=' . ((string)($_SERVER['SERVER_PORT'] ?? '')), 0);
+
+        $parsed = parse_url($uri);
+        $path = (string)($parsed['path'] ?? '');
+
+        // Prefer QUERY_STRING / $_GET over REQUEST_URI parsing, as REQUEST_URI may be missing the query part.
+        $query = (string)($parsed['query'] ?? '');
+        if ($query === '' && $qs !== '') {
+            $query = $qs;
+        }
+
+        $params = [];
+        if (!empty($_GET)) {
+            $params = $_GET;
+        } elseif ($query !== '') {
+            parse_str($query, $params);
+        }
+
+        $this->SendDebug('WEBHOOK', 'path=' . $path . ' query=' . $query . ' (params_source=' . (!empty($_GET) ? '$_GET' : ($query !== '' ? 'QUERY_STRING' : 'none')) . ')', 0);
+
+        // Only handle our instance-specific hook (must match the registered hook exactly)
+        $expected = '/hook/unfoldedcircle_dock3/' . $this->InstanceID . '/download';
+        if ($path !== $expected) {
+            $this->SendDebug('WEBHOOK', '❌ Path mismatch. expected=' . $expected . ' got=' . $path, 0);
+            http_response_code(404);
+            echo 'Not found';
+            return;
+        }
+        $this->SendDebug('WEBHOOK', '✅ Path matches expected hook', 0);
+
+        $file = isset($params['file']) ? (string)$params['file'] : '';
+        $token = isset($params['token']) ? (string)$params['token'] : '';
+        $this->SendDebug('WEBHOOK', 'params[file]=' . $file . ' params[token_prefix]=' . ($token !== '' ? substr($token, 0, 6) . '…' : 'EMPTY') . ' len=' . strlen($token), 0);
+
+        // Basic auth via stored secret
+        $secret = (string)$this->ReadAttributeString('DownloadSecret');
+        $this->SendDebug('WEBHOOK', 'secret_prefix=' . substr($secret, 0, 6) . '… len=' . strlen($secret), 0);
+
+        if ($secret === '') {
+            $this->SendDebug('WEBHOOK', '❌ Forbidden: DownloadSecret attribute is empty', 0);
+            http_response_code(403);
+            echo 'Forbidden';
+            return;
+        }
+
+        if ($token === '') {
+            $this->SendDebug('WEBHOOK', '❌ Forbidden: token parameter is missing/empty', 0);
+            http_response_code(403);
+            echo 'Forbidden';
+            return;
+        }
+
+        if (!hash_equals($secret, $token)) {
+            $this->SendDebug('WEBHOOK', '❌ Forbidden: token mismatch (secret_prefix=' . substr($secret, 0, 6) . '… vs token_prefix=' . substr($token, 0, 6) . '…)', 0);
+            http_response_code(403);
+            echo 'Forbidden';
+            return;
+        }
+
+        $this->SendDebug('WEBHOOK', '✅ Token OK', 0);
+
+        if ($file === '') {
+            $this->SendDebug('WEBHOOK', '❌ Missing file parameter', 0);
+            http_response_code(400);
+            echo 'Missing file parameter';
+            return;
+        }
+
+        // Prevent directory traversal
+        $file = basename($file);
+        $this->SendDebug('WEBHOOK', 'sanitized file=' . $file, 0);
+
+        // Location: /media/UCD3Exports/<file>
+        $kernelDir = IPS_GetKernelDir();
+        $mediaDir = rtrim($kernelDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'media';
+        $subDir = $mediaDir . DIRECTORY_SEPARATOR . 'UCD3Exports';
+        $fullPath = $subDir . DIRECTORY_SEPARATOR . $file;
+        $this->SendDebug('WEBHOOK', 'resolved fullPath=' . $fullPath, 0);
+
+        if (!is_file($fullPath)) {
+            $this->SendDebug('WEBHOOK', '❌ File not found at fullPath=' . $fullPath, 0);
+            http_response_code(404);
+            echo 'File not found';
+            return;
+        }
+        $this->SendDebug('WEBHOOK', '✅ File exists, starting download', 0);
+
+        // Try to set a helpful content-type based on extension
+        $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+        $contentType = 'application/octet-stream';
+        if ($ext === 'json') {
+            $contentType = 'application/json; charset=utf-8';
+        } elseif ($ext === 'csv') {
+            $contentType = 'text/csv; charset=utf-8';
+        } elseif ($ext === 'txt') {
+            $contentType = 'text/plain; charset=utf-8';
+        }
+
+        header('Content-Type: ' . $contentType);
+        header('Content-Disposition: attachment; filename="' . $file . '"');
+        header('Content-Length: ' . (string)filesize($fullPath));
+        $this->SendDebug('WEBHOOK', 'sending headers contentType=' . $contentType . ' size=' . (string)filesize($fullPath), 0);
+
+        // Output file
+        readfile($fullPath);
+    }
+
+    /**
+     * Handle request from child instances to get a full download URL for an exported file.
+     * Expected payload:
+     *  - fileName: string
+     *  - deviceInstanceId: int (optional, used for logging)
+     * Returns JSON: {"url":"..."} or {"error":"..."}
+     */
+    private function HandleGetDownloadUrl(array $payload): string
+    {
+        $fileName = (string)($payload['fileName'] ?? '');
+        $childId = (int)($payload['deviceInstanceId'] ?? 0);
+
+        $this->SendDebug('HandleGetDownloadUrl', 'request from child=' . $childId . ' fileName=' . $fileName, 0);
+
+        if (trim($fileName) === '') {
+            return json_encode(['error' => 'Missing fileName']);
+        }
+
+        // Build absolute URL for the download
+        $url = $this->BuildChildDownloadUrl($childId, $fileName);
+        if ($url === '') {
+            return json_encode(['error' => 'Failed to build download URL']);
+        }
+
+        return json_encode(['url' => $url], JSON_UNESCAPED_SLASHES);
+    }
+
+    /**
+     * Build a full (absolute) URL to download a file via this splitter's webhook.
+     * The webhook is implemented by this instance in ProcessHookData().
+     */
+    public function BuildChildDownloadUrl(int $childInstanceId, string $fileName): string
+    {
+        // Sanitize file name to avoid traversal
+        $fileName = basename($fileName);
+
+        // Relative part (includes token)
+        $relative = $this->GetDownloadUrl($fileName);
+
+        // Best-effort base URL discovery
+        $baseUrl = $this->DetectWebHookBaseUrl();
+
+        $this->SendDebug('BuildChildDownloadUrl', json_encode([
+            'child' => $childInstanceId,
+            'file' => $fileName,
+            'baseUrl' => $baseUrl,
+            'relative' => $relative
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 0);
+        $this->SendDebug('BuildChildDownloadUrl', 'finalUrl=' . (rtrim($baseUrl, '/') . $relative), 0);
+
+        if ($baseUrl === '') {
+            // Fallback: return relative URL if base could not be determined
+            return $relative;
+        }
+
+        return rtrim($baseUrl, '/') . $relative;
+    }
+
+    /**
+     * Try to detect a usable base URL (scheme://host:port) for the Symcon webhook.
+     * This is best-effort; if it fails, BuildChildDownloadUrl will return a relative URL.
+     */
+    private function DetectWebHookBaseUrl(): string
+    {
+        $scheme = 'http';
+        $port = 3777; // default WebFront/WebHook port
+
+        // Try to read port/SSL settings from the WebHook Control instance *safely*.
+        // IPS_GetProperty throws warnings if a property does not exist in the instance schema.
+        // Therefore we read the full configuration JSON and check keys.
+        try {
+            $ids = IPS_GetInstanceListByModuleID('{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}');
+            if (count($ids) > 0) {
+                $whId = $ids[0];
+                $cfgJson = IPS_GetConfiguration($whId);
+                $cfg = json_decode($cfgJson, true);
+                if (is_array($cfg)) {
+                    if (isset($cfg['Port']) && is_numeric($cfg['Port']) && (int)$cfg['Port'] > 0) {
+                        $port = (int)$cfg['Port'];
+                    }
+
+                    // Different Symcon versions may use different SSL property names
+                    foreach (['EnableSSL', 'UseSSL', 'SSL'] as $sslKey) {
+                        if (!array_key_exists($sslKey, $cfg)) {
+                            continue;
+                        }
+                        $v = $cfg[$sslKey];
+                        if (is_bool($v) && $v) {
+                            $scheme = 'https';
+                            break;
+                        }
+                        if (is_numeric($v) && (int)$v === 1) {
+                            $scheme = 'https';
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            // ignore and keep defaults
+        }
+
+        // Determine host/IP of the Symcon server.
+        // Prefer Sys_GetNetworkInfo (reliable on Symcon), fallback to PHP hostname resolution.
+        $host = '';
+        try {
+            $network = Sys_GetNetworkInfo();
+            if (is_array($network)) {
+                foreach ($network as $device) {
+                    $ip = (string)($device['IP'] ?? '');
+                    // Pick the first plausible IPv4 that is not loopback / APIPA
+                    if ($ip !== '' && $ip !== '127.0.0.1' && $ip !== 'localhost' && strpos($ip, '169.254.') !== 0) {
+                        $host = $ip;
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            // ignore
+        }
+
+        if ($host === '') {
+            try {
+                $host = gethostbyname(gethostname());
+                if (!is_string($host)) {
+                    $host = '';
+                }
+            } catch (Throwable $e) {
+                $host = '';
+            }
+        }
+
+        // If hostname resolution fails or returns localhost, try server_addr when available
+        if ($host === '' || $host === '127.0.0.1' || $host === 'localhost') {
+            $serverAddr = (string)($_SERVER['SERVER_ADDR'] ?? '');
+            if ($serverAddr !== '') {
+                $host = $serverAddr;
+            }
+        }
+
+        if ($host === '') {
+            return '';
+        }
+
+        return $scheme . '://' . $host . ':' . $port;
+    }
+
+    /**
+     * Helper: returns the instance-specific download URL (relative).
+     * You can build an absolute URL by prefixing your Symcon base URL.
+     */
+    public function GetDownloadUrl(string $filename): string
+    {
+        $filename = basename($filename);
+        $secret = (string)$this->ReadAttributeString('DownloadSecret');
+        return '/hook/unfoldedcircle_dock3/' . $this->InstanceID . '/download?file=' . rawurlencode($filename) . '&token=' . rawurlencode($secret);
     }
 
     /**
