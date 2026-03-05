@@ -765,12 +765,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         $varId = $entry['status_var_id'] ?? null;
                         if (is_numeric($varId) && @IPS_VariableExists($varId)) {
                             $stateVar = @GetValue($varId);
-                            $attributes['state'] = 'OFF';  // Default fallback
-
-                            // Optional: determine actual state from status_var_id if meaningful
-                            if (is_bool($stateVar)) {
-                                $attributes['state'] = $stateVar ? 'ON' : 'OFF';
-                            }
+                            // Normalize ON/OFF even if the status variable is not boolean (int/float/string/profile-association).
+                            $attributes['state'] = $this->NormalizeOnOffState((int)$varId, $stateVar);
 
                             // hvac_mode logic from mode_var_id
                             if (!empty($entry['mode_var_id']) && @IPS_VariableExists($entry['mode_var_id'])) {
@@ -820,21 +816,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         break;
 
                     case 'cover':
-                        $varId = $entry['position_var_id'] ?? null;
-                        if (is_numeric($varId) && @IPS_VariableExists($varId)) {
-                            $position = @GetValue($varId);
-                            $attributes['position'] = $position;
-
-                            if ($position == 0) {
-                                $attributes['state'] = 'CLOSED';
-                            } elseif ($position == 100) {
-                                $attributes['state'] = 'OPEN';
-                            } elseif ($position > 0 && $position < 50) {
-                                $attributes['state'] = 'CLOSING';
-                            } elseif ($position >= 50 && $position < 100) {
-                                $attributes['state'] = 'OPENING';
+                        $positionVarId = $entry['position_var_id'] ?? null;
+                        if (is_numeric($positionVarId) && @IPS_VariableExists((int)$positionVarId)) {
+                            $symconPos = @GetValue((int)$positionVarId);
+                            if (is_numeric($symconPos)) {
+                                $posRemote = $this->ConvertCoverPositionToRemote((int)$positionVarId, $symconPos);
+                                $attributes['position'] = (int)$posRemote;
+                                // Periodic update is a snapshot. Do not guess OPENING/CLOSING here.
+                                $attributes['state'] = ($posRemote <= 0) ? 'CLOSED' : 'OPEN';
                             } else {
-                                $attributes['state'] = 'SETTING';
+                                $attributes['state'] = 'UNKNOWN';
                             }
 
                             $this->SendEntityChange('cover_' . $entry['instance_id'], 'cover', $attributes);
@@ -851,7 +842,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                                 $attributes['brightness'] = $this->ConvertBrightnessToRemote($entry['brightness_var_id']);
                             }
                             if (!empty($entry['color_temp_var_id']) && @IPS_VariableExists($entry['color_temp_var_id'])) {
-                                $attributes['color_temperature'] = @GetValue($entry['color_temp_var_id']);
+                                $ctVal = GetValue($entry['color_temp_var_id']);
+                                $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($entry['color_temp_var_id'], $ctVal);
                             }
                             if (!empty($entry['color_var_id']) && @IPS_VariableExists($entry['color_var_id'])) {
                                 $result = $this->ConvertHexColorToHueSaturation($entry['color_var_id']);
@@ -1028,6 +1020,74 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         return $formatted;
+    }
+
+    /**
+     * Normalize a Symcon variable value to UC ON/OFF.
+     * Supports bool, numeric, string and (best-effort) profile associations.
+     */
+    private function NormalizeOnOffState(int $varId, $rawValue): string
+    {
+        if (is_bool($rawValue)) {
+            return $rawValue ? 'ON' : 'OFF';
+        }
+
+        if (is_int($rawValue) || is_float($rawValue) || (is_string($rawValue) && is_numeric($rawValue))) {
+            return ((float)$rawValue) > 0 ? 'ON' : 'OFF';
+        }
+
+        if (is_string($rawValue)) {
+            $v = strtolower(trim($rawValue));
+            $onHints = ['on', 'an', 'ein', 'true', 'yes'];
+            $offHints = ['off', 'aus', 'false', 'no'];
+            if (in_array($v, $onHints, true)) {
+                return 'ON';
+            }
+            if (in_array($v, $offHints, true)) {
+                return 'OFF';
+            }
+        }
+
+        // Best-effort: interpret associations from the (custom) variable profile
+        if (@IPS_VariableExists($varId)) {
+            $vInfo = @IPS_GetVariable($varId);
+            if (is_array($vInfo)) {
+                $profile = trim((string)($vInfo['VariableCustomProfile'] ?? ''));
+                if ($profile === '') {
+                    $profile = trim((string)($vInfo['VariableProfile'] ?? ''));
+                }
+
+                if ($profile !== '' && @IPS_VariableProfileExists($profile)) {
+                    $p = IPS_GetVariableProfile($profile);
+                    $assocs = $p['Associations'] ?? [];
+                    if (is_array($assocs)) {
+                        foreach ($assocs as $a) {
+                            if (!is_array($a) || !isset($a['Value'], $a['Name'])) {
+                                continue;
+                            }
+                            if ((string)$a['Value'] !== (string)$rawValue) {
+                                continue;
+                            }
+                            $label = strtolower(trim((string)$a['Name']));
+                            $onLabelHints = ['on', 'an', 'ein', 'active', 'aktiv'];
+                            $offLabelHints = ['off', 'aus', 'inactive', 'inaktiv'];
+                            foreach ($onLabelHints as $h) {
+                                if (str_contains($label, $h)) {
+                                    return 'ON';
+                                }
+                            }
+                            foreach ($offLabelHints as $h) {
+                                if (str_contains($label, $h)) {
+                                    return 'OFF';
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return 'OFF';
     }
 
     private function Send(string $Text): void
@@ -2190,8 +2250,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     isset($entry['instance_id']) && !empty($entry['instance_id'])
                 ) {
                     $varId = (int)$entry['position_var_id'];
-                    $position = @GetValue($varId);
-                    $stateStr = 'SETTING';
+                    $symconPos = @GetValue($varId);
+                    $position = $this->ConvertCoverPositionToRemote($varId, $symconPos);
+                    $stateStr = ($position <= 0) ? 'CLOSED' : 'OPEN';
                     $entities[] = [
                         'entity_id' => 'cover_' . $entry['instance_id'],
                         'entity_type' => 'cover',
@@ -2252,19 +2313,22 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     }
 
                     $attributes = [];
-                    $state = 'OFF';
 
-                    if (!empty($entry['mode_var_id']) && IPS_VariableExists($entry['mode_var_id'])) {
-                        $value = GetValue($entry['mode_var_id']);
-                        $label = $this->GetProfileValueLabel($entry['mode_var_id'], $value);
-                        $allowedStates = ['HEAT', 'COOL', 'HEAT_COOL', 'FAN', 'AUTO', 'OFF'];
-                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_IO, "🌡️ Modus-Wert ($value) → Label: $label", 0);
-                        if (in_array($label, $allowedStates)) {
-                            $state = $label;
+                    // 1) state = ON/OFF aus status_var_id
+                    $statusVarId = (int)$entry['status_var_id'];
+                    $statusRaw = @GetValue($statusVarId);
+                    $attributes['state'] = $this->NormalizeOnOffState($statusVarId, $statusRaw);
+
+                    // 2) hvac_mode (optional) aus mode_var_id
+                    if (!empty($entry['mode_var_id']) && @IPS_VariableExists((int)$entry['mode_var_id'])) {
+                        $modeVarId = (int)$entry['mode_var_id'];
+                        $modeVal = @GetValue($modeVarId);
+                        $modeLabel = $this->GetProfileValueLabel($modeVarId, $modeVal);
+                        $allowedModes = ['HEAT', 'COOL', 'HEAT_COOL', 'FAN', 'AUTO', 'OFF'];
+                        if (in_array($modeLabel, $allowedModes, true)) {
+                            $attributes[Entity_Climate::ATTR_HVAC_MODE] = $modeLabel;
                         }
                     }
-
-                    $attributes['state'] = $state;
 
                     if (!empty($entry['target_temp_var_id']) && IPS_VariableExists($entry['target_temp_var_id'])) {
                         $attributes[Entity_Climate::ATTR_TARGET_TEMPERATURE] = GetValue($entry['target_temp_var_id']);
@@ -2272,10 +2336,6 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
                     if (!empty($entry['current_temp_var_id']) && IPS_VariableExists($entry['current_temp_var_id'])) {
                         $attributes[Entity_Climate::ATTR_CURRENT_TEMPERATURE] = GetValue($entry['current_temp_var_id']);
-                    }
-
-                    if (!empty($entry['mode_var_id']) && IPS_VariableExists($entry['mode_var_id'])) {
-                        $attributes[Entity_Climate::ATTR_HVAC_MODE] = "COOL"; // statisch für Test
                     }
 
                     $entities[] = [
@@ -2392,6 +2452,156 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_IO, '📤 entity_states payload: ' . json_encode($entities), 0);
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
         // $this->SendDebug(__FUNCTION__, "✅ SendEntityStates abgeschlossen", 0);
+    }
+
+    /**
+     * Returns the effective (custom or default) variable profile name for a variable id.
+     */
+    private function GetEffectiveVariableProfile(int $varId): string
+    {
+        if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+            return '';
+        }
+        $var = IPS_GetVariable($varId);
+        return (string)($var['VariableCustomProfile'] ?: $var['VariableProfile'] ?: '');
+    }
+
+    /**
+     * Detect whether a cover position profile is reversed.
+     *
+     * Reversed means: minimum value represents OPEN and maximum represents CLOSED.
+     * Normal means: minimum represents CLOSED and maximum represents OPEN.
+     */
+    private function IsCoverProfileReversed(string $profileName, array $profileData): bool
+    {
+        $p = strtolower($profileName);
+
+        // Explicit reverse hint in profile name
+        if (str_contains($p, 'reversed')) {
+            return true;
+        }
+
+        // Heuristic using associations (if present)
+        $min = $profileData['MinValue'] ?? null;
+        $max = $profileData['MaxValue'] ?? null;
+        $assocs = $profileData['Associations'] ?? [];
+
+        if ($min === null || $max === null || !is_array($assocs) || empty($assocs)) {
+            return false;
+        }
+
+        $minLabel = '';
+        $maxLabel = '';
+        foreach ($assocs as $a) {
+            if (!is_array($a) || !isset($a['Value'], $a['Name'])) {
+                continue;
+            }
+            if ((string)$a['Value'] === (string)$min) {
+                $minLabel = strtolower((string)$a['Name']);
+            }
+            if ((string)$a['Value'] === (string)$max) {
+                $maxLabel = strtolower((string)$a['Name']);
+            }
+        }
+
+        $openHints = ['open', 'opened', 'auf', 'geöffnet', 'offen'];
+        $closedHints = ['close', 'closed', 'zu', 'geschlossen'];
+
+        $minIsOpen = false;
+        foreach ($openHints as $h) {
+            if ($minLabel !== '' && str_contains($minLabel, $h)) {
+                $minIsOpen = true;
+                break;
+            }
+        }
+
+        $maxIsClosed = false;
+        foreach ($closedHints as $h) {
+            if ($maxLabel !== '' && str_contains($maxLabel, $h)) {
+                $maxIsClosed = true;
+                break;
+            }
+        }
+
+        return $minIsOpen && $maxIsClosed;
+    }
+
+    /**
+     * Convert Remote cover position (0..100, 0=CLOSED, 100=OPEN) to Symcon value for RequestAction().
+     */
+    private function ConvertCoverPositionFromRemote(int $positionVarId, int $remotePos): float|int
+    {
+        $remotePos = max(0, min(100, (int)$remotePos));
+
+        $profile = $this->GetEffectiveVariableProfile($positionVarId);
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            // Fallback assume 0..100 int
+            return $remotePos;
+        }
+
+        $profileData = IPS_GetVariableProfile($profile);
+        $min = (float)($profileData['MinValue'] ?? 0.0);
+        $max = (float)($profileData['MaxValue'] ?? 100.0);
+
+        // Remote normalized 0..1 where 0=CLOSED and 1=OPEN
+        $norm = $remotePos / 100.0;
+
+        // If Symcon profile is reversed (min=open, max=closed), invert norm
+        if ($this->IsCoverProfileReversed($profile, $profileData)) {
+            $norm = 1.0 - $norm;
+        }
+
+        // Scale to profile min..max
+        $scaled = $min + ($norm * ($max - $min));
+
+        // Clamp
+        $scaled = max(min($scaled, $max), $min);
+
+        // Return type-correct value
+        $var = IPS_GetVariable($positionVarId);
+        $type = (int)($var['VariableType'] ?? 1); // 1=int, 2=float
+        if ($type === 2) {
+            return (float)$scaled;
+        }
+        return (int)round($scaled);
+    }
+
+    /**
+     * Convert Symcon cover position value to Remote cover position (0..100, 0=CLOSED, 100=OPEN).
+     */
+    private function ConvertCoverPositionToRemote(int $positionVarId, $symconValue): int
+    {
+        if (!is_numeric($symconValue)) {
+            return 0;
+        }
+
+        $profile = $this->GetEffectiveVariableProfile($positionVarId);
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            // Fallback assume already 0..100
+            return max(0, min(100, (int)round((float)$symconValue)));
+        }
+
+        $profileData = IPS_GetVariableProfile($profile);
+        $min = (float)($profileData['MinValue'] ?? 0.0);
+        $max = (float)($profileData['MaxValue'] ?? 100.0);
+        if ($max == $min) {
+            return 0;
+        }
+
+        $v = (float)$symconValue;
+        $v = max(min($v, $max), $min);
+
+        // Normalize 0..1 in profile space
+        $norm = ($v - $min) / ($max - $min);
+        $norm = max(0.0, min(1.0, $norm));
+
+        // If profile is reversed, invert norm to match Remote semantics
+        if ($this->IsCoverProfileReversed($profile, $profileData)) {
+            $norm = 1.0 - $norm;
+        }
+
+        $remotePos = (int)round($norm * 100.0);
+        return max(0, min(100, $remotePos));
     }
 
     /**
@@ -3606,62 +3816,81 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         switch ($cmdId) {
             case 'open':
-                if ($controlVar) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔧 Versuche zu öffnen: controlVar=$controlVar", 0);
-                    if (IPS_VariableExists($controlVar)) {
-                        RequestAction($controlVar, 0); // 0 = open
-                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Öffne Cover (RequestAction $controlVar mit 0)", 0);
-                        $attributes['state'] = 'OPEN';
-                    } else {
-                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Variable für open existiert nicht: ID=$controlVar", 0);
-                    }
+                // Prefer position var if available (profile-aware), else use control var.
+                if ($positionVar && IPS_VariableExists($positionVar)) {
+                    $currentRemote = $this->ConvertCoverPositionToRemote($positionVar, @GetValue($positionVar));
+                    $targetRemote = 100;
+                    $symconValue = $this->ConvertCoverPositionFromRemote($positionVar, $targetRemote);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Öffne Cover per PositionVar $positionVar → remote=$targetRemote symcon=" . json_encode($symconValue), 0);
+                    RequestAction($positionVar, $symconValue);
+                    $attributes['state'] = $this->GetCoverMoveStateFromRemotePos($currentRemote, $targetRemote);
+                    $attributes['position'] = $targetRemote;
+                } elseif ($controlVar && IPS_VariableExists($controlVar)) {
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Öffne Cover (RequestAction $controlVar mit 0)", 0);
+                    RequestAction($controlVar, 0); // legacy mapping
+                    $attributes['state'] = 'OPENING';
+                    $attributes['position'] = 100;
                 } else {
-                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ controlVar für open fehlt", 0);
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Keine gültige Variable für open (positionVar/controlVar)", 0);
                 }
                 break;
+
             case 'close':
-                if ($controlVar) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔧 Versuche zu schließen: controlVar=$controlVar", 0);
-                    if (IPS_VariableExists($controlVar)) {
-                        RequestAction($controlVar, 2); // 2 = close
-                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Schließe Cover (RequestAction $controlVar mit 2)", 0);
-                        $attributes['state'] = 'CLOSED';
-                    } else {
-                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Variable für close existiert nicht: ID=$controlVar", 0);
-                    }
+                if ($positionVar && IPS_VariableExists($positionVar)) {
+                    $currentRemote = $this->ConvertCoverPositionToRemote($positionVar, @GetValue($positionVar));
+                    $targetRemote = 0;
+                    $symconValue = $this->ConvertCoverPositionFromRemote($positionVar, $targetRemote);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Schließe Cover per PositionVar $positionVar → remote=$targetRemote symcon=" . json_encode($symconValue), 0);
+                    RequestAction($positionVar, $symconValue);
+                    $attributes['state'] = $this->GetCoverMoveStateFromRemotePos($currentRemote, $targetRemote);
+                    $attributes['position'] = $targetRemote;
+                } elseif ($controlVar && IPS_VariableExists($controlVar)) {
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Schließe Cover (RequestAction $controlVar mit 2)", 0);
+                    RequestAction($controlVar, 2); // legacy mapping
+                    $attributes['state'] = 'CLOSING';
+                    $attributes['position'] = 0;
                 } else {
-                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ controlVar für close fehlt", 0);
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Keine gültige Variable für close (positionVar/controlVar)", 0);
                 }
                 break;
+
             case 'stop':
-                if ($controlVar) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔧 Versuche zu stoppen: controlVar=$controlVar", 0);
-                    if (IPS_VariableExists($controlVar)) {
-                        RequestAction($controlVar, 1); // 1 = stop
-                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Stoppe Cover (RequestAction $controlVar mit 1)", 0);
-                        $attributes['state'] = 'STOPPED';
-                    } else {
-                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Variable für stop existiert nicht: ID=$controlVar", 0);
-                    }
+                if ($controlVar && IPS_VariableExists($controlVar)) {
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Stoppe Cover (RequestAction $controlVar mit 1)", 0);
+                    RequestAction($controlVar, 1); // legacy mapping
                 } else {
-                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ controlVar für stop fehlt", 0);
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ controlVar für stop fehlt oder existiert nicht", 0);
+                }
+
+                // UC cover has no STOPPED state. Send a snapshot based on current position if possible.
+                if ($positionVar && IPS_VariableExists($positionVar)) {
+                    $posRemote = $this->ConvertCoverPositionToRemote($positionVar, @GetValue($positionVar));
+                    $attributes['position'] = $posRemote;
+                    $attributes['state'] = $this->GetCoverSnapshotStateFromRemotePos($posRemote);
+                } else {
+                    $attributes['state'] = 'UNKNOWN';
                 }
                 break;
+
             case 'position':
-                if (isset($params['position']) && $positionVar) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔧 Zielposition erhalten: " . $params['position'], 0);
-                    if (IPS_VariableExists($positionVar)) {
-                        RequestAction($positionVar, (int)$params['position']);
-                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Position gesetzt auf " . $params['position'], 0);
-                        $attributes['state'] = 'SETTING';
-                        $attributes['position'] = (int)$params['position'];
-                    } else {
-                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Variable für Position existiert nicht: ID=$positionVar", 0);
-                    }
+                if (isset($params['position']) && $positionVar && IPS_VariableExists($positionVar)) {
+                    $targetRemote = (int)$params['position'];
+                    $targetRemote = max(0, min(100, $targetRemote));
+
+                    $currentRemote = $this->ConvertCoverPositionToRemote($positionVar, @GetValue($positionVar));
+                    $symconValue = $this->ConvertCoverPositionFromRemote($positionVar, $targetRemote);
+
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔧 Zielposition remote=$targetRemote (current=$currentRemote) → RequestAction $positionVar symcon=" . json_encode($symconValue), 0);
+                    RequestAction($positionVar, $symconValue);
+
+                    // Optimistic UI: show movement direction; UC has no SETTING.
+                    $attributes['state'] = $this->GetCoverMoveStateFromRemotePos($currentRemote, $targetRemote);
+                    $attributes['position'] = $targetRemote;
                 } else {
-                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Position-Parameter oder ID fehlt", 0);
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Position-Parameter oder positionVar fehlt / existiert nicht", 0);
                 }
                 break;
+
             default:
                 $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Unbekannter Cover-Command: $cmdId", 0);
                 IPS_SemaphoreLeave($lockName);
@@ -3761,9 +3990,13 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         if (isset($params['color_temperature']) && $color_temp_var_id && IPS_VariableExists($color_temp_var_id)) {
-            $value = (int)$params['color_temperature'];
-            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Set color temperature to $value", 0);
-            RequestAction($color_temp_var_id, $value);
+            $remoteValue = (int)$params['color_temperature'];
+            $symconValue = $this->ConvertColorTemperatureFromRemote($color_temp_var_id, $remoteValue);
+
+            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY,
+                "✅ Set color temperature remote=$remoteValue → symcon=" . json_encode($symconValue), 0);
+
+            RequestAction($color_temp_var_id, $symconValue);
             usleep(10000);
         }
 
@@ -3788,8 +4021,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $attributes['hue'] = $hs['hue'];
             $attributes['saturation'] = $hs['saturation'];
         }
-        if (isset($params['color_temperature'])) {
-            $attributes['color_temperature'] = (int)$params['color_temperature'];
+        if (!empty($color_temp_var_id) && IPS_VariableExists($color_temp_var_id)) {
+            $symconValue = @GetValue($color_temp_var_id);
+            $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($color_temp_var_id, $symconValue);
         }
         $this->SendEntityChange($entityId, 'light', $attributes);
         $this->SendSuccessResponse((int)$reqId, $clientIP, (int)$clientPort);
@@ -3835,6 +4069,28 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         $symconValue = (int)GetValue($varId);
         return (int)round((($symconValue - $min) / ($max - $min)) * 255);
+    }
+
+    /**
+     * Snapshot state for the Remote based on position only.
+     */
+    private function GetCoverSnapshotStateFromRemotePos(int $remotePos): string
+    {
+        $remotePos = max(0, min(100, $remotePos));
+        return ($remotePos <= 0) ? 'CLOSED' : 'OPEN';
+    }
+
+    /**
+     * Movement state helper (OPENING/CLOSING) from current/target remote position.
+     */
+    private function GetCoverMoveStateFromRemotePos(int $currentRemotePos, int $targetRemotePos): string
+    {
+        $currentRemotePos = max(0, min(100, $currentRemotePos));
+        $targetRemotePos = max(0, min(100, $targetRemotePos));
+        if ($targetRemotePos === $currentRemotePos) {
+            return $this->GetCoverSnapshotStateFromRemotePos($targetRemotePos);
+        }
+        return ($targetRemotePos > $currentRemotePos) ? 'OPENING' : 'CLOSING';
     }
 
     private function ConvertHueSaturationToHexColor(int $hue, int $saturation): int
@@ -4384,12 +4640,23 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 }
 
                 if ($newState !== null && $current !== $newState) {
+                    // Optimistic UI update: send the intended state immediately so the UI flips instantly.
+                    $optimisticStateStr = $newState ? 'ON' : 'OFF';
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "⚡ Optimistic entity_change for $entityId → $optimisticStateStr", 0);
+                    $this->SendEntityChange($entityId, 'switch', ['state' => $optimisticStateStr]);
+
+                    // Execute the action in Symcon
                     $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ RequestAction for VarID $varId with value " . json_encode($newState), 0);
                     RequestAction($varId, $newState);
+
+                    // Optional: read back shortly after and correct UI if the real state differs
                     usleep(10000); // 10ms
-                    $updated = @GetValue($varId);  // neuen Zustand auslesen
+                    $updated = @GetValue($varId);
                     $stateStr = $updated ? 'ON' : 'OFF';
-                    $this->SendEntityChange("switch_$varId", "switch", ['state' => $stateStr]);
+                    if ($stateStr !== $optimisticStateStr) {
+                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🩹 Correcting entity_change for $entityId → $stateStr (was optimistic $optimisticStateStr)", 0);
+                        $this->SendEntityChange($entityId, 'switch', ['state' => $stateStr]);
+                    }
                 } else {
                     $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "⏩ No RequestAction required – state unchanged", 0);
                 }
@@ -4504,6 +4771,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
      * Verwendet einen RAM-Puffer für den letzten gesendeten Zustand, um Attributschreibungen zu vermeiden.
      */
     private array $stateBuffer = [];
+    // Separate buffer for cover movement detection (avoid mixing with switch stateBuffer keys)
+    private array $coverStateBuffer = [];
 
     public function SendEntityStateUpdate(int $varId): void
     {
@@ -4531,11 +4800,13 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
                     $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Switch mapping found for VarID $varId → State: $stateStr", 0);
 
+                    $mappedEntityId = 'switch_' . (string)$entry['instance_id'];
+
                     $event = [
                         'kind' => 'event',
                         'msg' => 'entity_state',
                         'msg_data' => [
-                            'entity_id' => 'switch_' . $varId,
+                            'entity_id' => $mappedEntityId,
                             'entity_type' => 'switch',
                             'attributes' => [
                                 'state' => $stateStr
@@ -4631,7 +4902,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     }
                 }
                 if (!empty($entry['color_temp_var_id']) && IPS_VariableExists($entry['color_temp_var_id'])) {
-                    $attributes['color_temperature'] = (int)@GetValue($entry['color_temp_var_id']);
+                    $ctVal = GetValue($entry['color_temp_var_id']);
+                    $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($entry['color_temp_var_id'], $ctVal);
                 }
 
                 $event = [
@@ -4657,22 +4929,65 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 if (!isset($entry['position_var_id']) || (int)$entry['position_var_id'] !== $varId) {
                     continue;
                 }
-                $position = @GetValue($varId);
-                $state = 'SETTING';
+
+                // Always convert Symcon value -> Remote position (0..100, 0=CLOSED, 100=OPEN)
+                $symconPosRaw = @GetValue($varId);
+                $position = (is_numeric($symconPosRaw)) ? $this->ConvertCoverPositionToRemote($varId, $symconPosRaw) : null;
+
+                // Fallback if position is not readable
+                if ($position === null) {
+                    $attributes = ['state' => 'UNKNOWN'];
+                } else {
+                    // Detect movement based on position changes
+                    $now = time();
+                    $buf = $this->coverStateBuffer[$varId] ?? null;
+                    $lastPos = is_array($buf) && isset($buf['pos']) ? (int)$buf['pos'] : null;
+                    $lastMoveTs = is_array($buf) && isset($buf['last_move_ts']) ? (int)$buf['last_move_ts'] : 0;
+                    $lastDir = is_array($buf) && isset($buf['dir']) ? (string)$buf['dir'] : '';
+
+                    $state = null;
+
+                    if ($lastPos === null) {
+                        // First observation: assume stable
+                        $state = ($position <= 0) ? 'CLOSED' : 'OPEN';
+                        $this->coverStateBuffer[$varId] = ['pos' => $position, 'last_move_ts' => 0, 'dir' => ''];
+                    } elseif ($position !== $lastPos) {
+                        // Position changed -> moving
+                        $dir = ($position > $lastPos) ? 'OPENING' : 'CLOSING';
+                        $state = $dir;
+                        $this->coverStateBuffer[$varId] = ['pos' => $position, 'last_move_ts' => $now, 'dir' => $dir];
+                    } else {
+                        // Position unchanged -> may be stable or we just missed intermediate updates
+                        // If we recently saw movement, keep OPENING/CLOSING only for a short grace period,
+                        // otherwise report stable OPEN/CLOSED based on current position.
+                        $graceSeconds = 2;
+                        if ($lastMoveTs > 0 && ($now - $lastMoveTs) <= $graceSeconds && ($lastDir === 'OPENING' || $lastDir === 'CLOSING')) {
+                            $state = $lastDir;
+                        } else {
+                            $state = ($position <= 0) ? 'CLOSED' : 'OPEN';
+                            $this->coverStateBuffer[$varId] = ['pos' => $position, 'last_move_ts' => 0, 'dir' => ''];
+                        }
+                    }
+
+                    $attributes = [
+                        'state' => $state,
+                        'position' => $position
+                    ];
+                }
+
+                $eid = 'cover_' . (string)($entry['instance_id'] ?? $varId);
                 $event = [
                     'kind' => 'event',
                     'msg' => 'entity_change',
                     'cat' => 'ENTITY',
                     'msg_data' => [
                         'entity_type' => 'cover',
-                        'entity_id' => 'cover_' . $varId,
-                        'attributes' => [
-                            'state' => $state,
-                            'position' => $position
-                        ]
+                        'entity_id' => $eid,
+                        'attributes' => $attributes
                     ]
                 ];
-                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for cover VarID $varId", 0);
+
+                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for cover $eid (VarID $varId) | " . json_encode($attributes), 0);
                 $this->BroadcastEventToClients($event);
                 return;
             }
@@ -4685,38 +5000,53 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 if (!isset($entry['status_var_id']) || (int)$entry['status_var_id'] !== $varId) {
                     continue;
                 }
-                // Dynamische State-Bestimmung
-                $state = 'OFF';
-                if (isset($entry['mode_var_id']) && IPS_VariableExists($entry['mode_var_id'])) {
-                    $value = GetValue($entry['mode_var_id']);
-                    $label = $this->GetProfileValueLabel($entry['mode_var_id'], $value);
-                    $allowedStates = ['HEAT', 'COOL', 'HEAT_COOL', 'FAN', 'AUTO', 'OFF'];
-                    if (in_array($label, $allowedStates)) {
-                        $state = $label;
+
+                $attributes = [];
+
+                // UC Climate state: ON/OFF based on status_var_id
+                $statusVarId = (int)$entry['status_var_id'];
+                $statusRaw = @GetValue($statusVarId);
+                $attributes['state'] = $this->NormalizeOnOffState($statusVarId, $statusRaw);
+
+                // Temperatures
+                if (!empty($entry['current_temp_var_id']) && @IPS_VariableExists((int)$entry['current_temp_var_id'])) {
+                    $attributes['current_temperature'] = (float)@GetValue((int)$entry['current_temp_var_id']);
+                }
+                if (!empty($entry['target_temp_var_id']) && @IPS_VariableExists((int)$entry['target_temp_var_id'])) {
+                    $attributes['target_temperature'] = (float)@GetValue((int)$entry['target_temp_var_id']);
+                }
+
+                // UC HVAC mode (optional)
+                if (!empty($entry['mode_var_id']) && @IPS_VariableExists((int)$entry['mode_var_id'])) {
+                    $modeVarId = (int)$entry['mode_var_id'];
+                    $modeVal = @GetValue($modeVarId);
+                    $modeLabel = $this->GetProfileValueLabel($modeVarId, $modeVal);
+                    $allowedModes = ['HEAT', 'COOL', 'HEAT_COOL', 'FAN', 'AUTO', 'OFF'];
+                    if (in_array($modeLabel, $allowedModes, true)) {
+                        // Use the constant if present, fallback to plain key
+                        if (class_exists('Entity_Climate') && defined('Entity_Climate::ATTR_HVAC_MODE')) {
+                            $attributes[Entity_Climate::ATTR_HVAC_MODE] = $modeLabel;
+                        } else {
+                            $attributes['hvac_mode'] = $modeLabel;
+                        }
                     }
                 }
-                $attributes = [];
-                $attributes['state'] = $state;
-                if (!empty($entry['current_temp_var_id']) && IPS_VariableExists($entry['current_temp_var_id'])) {
-                    $attributes['current_temperature'] = (float)@GetValue($entry['current_temp_var_id']);
-                }
-                if (!empty($entry['target_temp_var_id']) && IPS_VariableExists($entry['target_temp_var_id'])) {
-                    $attributes['target_temperature'] = (float)@GetValue($entry['target_temp_var_id']);
-                }
-                if (!empty($entry['mode_var_id']) && IPS_VariableExists($entry['mode_var_id'])) {
-                    $attributes['hvac_mode'] = @GetValue($entry['mode_var_id']);
-                }
+
+                // Use instance_id for entity_id (fallback to status var id)
+                $eid = 'climate_' . (string)($entry['instance_id'] ?? $entry['status_var_id']);
+
                 $event = [
                     'kind' => 'event',
                     'msg' => 'entity_change',
                     'cat' => 'ENTITY',
                     'msg_data' => [
                         'entity_type' => 'climate',
-                        'entity_id' => 'climate_' . $entry['status_var_id'],
+                        'entity_id' => $eid,
                         'attributes' => $attributes
                     ]
                 ];
-                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for climate VarID {$entry['status_var_id']}", 0);
+
+                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for climate $eid (VarID $varId) | " . json_encode($attributes), 0);
                 $this->BroadcastEventToClients($event);
                 return;
             }
@@ -4830,6 +5160,62 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ No mapping found for VarID $varId", 0);
     }
 
+    private function GetVariableProfileDetails(int $varId): array
+    {
+        $profile = $this->GetEffectiveVariableProfile($varId);
+        if ($profile === '' || !IPS_VariableProfileExists($profile)) {
+            return ['profile' => $profile, 'min' => null, 'max' => null, 'suffix' => ''];
+        }
+        $p = IPS_GetVariableProfile($profile);
+        return [
+            'profile' => $profile,
+            'min' => isset($p['MinValue']) ? (float)$p['MinValue'] : null,
+            'max' => isset($p['MaxValue']) ? (float)$p['MaxValue'] : null,
+            'suffix' => (string)($p['Suffix'] ?? '')
+        ];
+    }
+
+    private function ConvertColorTemperatureFromRemote(int $varId, $remoteValue): float
+    {
+        $r = is_numeric($remoteValue) ? (float)$remoteValue : 0.0;
+        $r = max(0.0, min(100.0, $r));
+
+        $d = $this->GetVariableProfileDetails($varId);
+        $min = $d['min'];
+        $max = $d['max'];
+
+        // Kein Profil? Dann nehmen wir an: Symcon erwartet auch 0..100
+        if (!is_numeric($min) || !is_numeric($max) || $max <= $min) {
+            return $r;
+        }
+
+        return $min + (($max - $min) * ($r / 100.0));
+    }
+
+    private function ConvertColorTemperatureToRemote(int $varId, $symconValue): int
+    {
+        if (!is_numeric($symconValue)) {
+            return 0;
+        }
+
+        $v = (float)$symconValue;
+
+        $d = $this->GetVariableProfileDetails($varId);
+        $min = $d['min'];
+        $max = $d['max'];
+
+        // Kein Profil? Dann nehmen wir an: Symcon liefert schon 0..100
+        if (!is_numeric($min) || !is_numeric($max) || $max <= $min) {
+            $v = max(0.0, min(100.0, $v));
+            return (int)round($v);
+        }
+
+        $v = max($min, min($max, $v));
+        $r = (($v - $min) / ($max - $min)) * 100.0;
+        $r = max(0.0, min(100.0, $r));
+        return (int)round($r);
+    }
+
     /**
      * Broadcasts an event to all authenticated or whitelisted clients.
      *
@@ -4931,14 +5317,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         'cat' => 'ENTITY',
                         'msg_data' => [
                             'entity_type' => 'switch',
-                            'entity_id' => 'switch_' . $switch['var_id'],
+                            'entity_id' => 'switch_' . (string)$switch['instance_id'],
                             'attributes' => [
                                 'state' => $state
                             ]
                         ]
                     ];
 
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for switch_{$switch['var_id']} to $clientIP:$port", 0);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for switch_" . (string)$switch['instance_id'] . " to $clientIP:$port", 0);
                     $this->PushToRemoteClient($event, $clientIP, $port);
                 }
             }
