@@ -473,10 +473,8 @@ class Remote3IRDockDevice extends IPSModuleStrict
             throw new Exception('Ungültige Zielkategorie (scriptCategory). Bitte im Formular eine Kategorie auswählen.');
         }
 
-        $type = strtoupper($this->ReadPropertyString('deviceType'));
-        $rows = $type === 'RF'
-            ? json_decode($this->ReadPropertyString('rfCommands'), true)
-            : json_decode($this->ReadPropertyString('commands'), true);
+        // Dock 3 is IR-only: always use the Commands list
+        $rows = json_decode($this->ReadPropertyString('commands'), true);
 
         if (!is_array($rows)) {
             throw new Exception('Commands list is invalid');
