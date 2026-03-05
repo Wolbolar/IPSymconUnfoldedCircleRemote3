@@ -941,7 +941,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             $attributes['value'] = $result['value'];
                             $attributes['unit'] = $result['unit'];
                             $attributes['state'] = 'ON';
-                            $this->SendEntityChange('sensor_' . $entry['instance_id'], 'sensor', $attributes);
+                            $this->SendEntityChange('sensor_' . (int)$varId, 'sensor', $attributes);
                         }
                         break;
 
@@ -1392,6 +1392,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 break;
 
             case 'get_entity_states':
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_IO, '📥 get_entity_states msg_data: ' . json_encode($json['msg_data'] ?? new stdClass()), 0);
                 $this->SendEntityStates($clientIP, $clientPort, $reqId);
                 break;
 
@@ -1993,6 +1994,15 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         }
                         break;
 
+                    case 'sensor':
+                        // Sensors are 1:1 with a Symcon variable. Instances can expose multiple sensor variables.
+                        // Therefore use var_id as unique entity identifier.
+                        if (!isset($entry['var_id']) || !is_numeric($entry['var_id'])) {
+                            continue 2;
+                        }
+                        $entityId = 'sensor_' . (int)$entry['var_id'];
+                        break;
+
                     default:
                         if (!isset($entry['instance_id'])) continue 2;
                         $entityId = $type . '_' . $entry['instance_id'];
@@ -2116,12 +2126,15 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         if (is_array($switchMapping)) {
             // $this->SendDebug(__FUNCTION__, "🔍 Verarbeite Switch-Mapping...", 0);
             foreach ($switchMapping as $entry) {
+                if (!isset($entry['instance_id']) || !is_numeric($entry['instance_id'])) {
+                    continue;
+                }
                 if (isset($entry['var_id']) && is_numeric($entry['var_id'])) {
                     $varId = (int)$entry['var_id'];
                     $state = @GetValue($varId);
                     $stateStr = ($state) ? 'ON' : 'OFF';
                     $entities[] = [
-                        'entity_id' => 'switch_' . $varId,
+                        'entity_id' => 'switch_' . (int)$entry['instance_id'],
                         'entity_type' => 'switch',
                         'attributes' => [
                             Entity_Switch::ATTR_STATE => $stateStr
@@ -2188,6 +2201,34 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         ]
                     ];
                 }
+            }
+        }
+
+        // Sensors
+        $sensorMapping = json_decode($this->ReadPropertyString('sensor_mapping'), true);
+        if (is_array($sensorMapping)) {
+            foreach ($sensorMapping as $entry) {
+                if (!isset($entry['var_id']) || !is_numeric($entry['var_id'])) {
+                    continue;
+                }
+                $varId = (int)$entry['var_id'];
+                if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+                    continue;
+                }
+
+                $result = $this->GetSensorValueAndUnit($varId);
+
+                // Remote sensor entities are read-only. Provide value in a robust way.
+                // Use both 'value' and 'state' to maximize compatibility across Core versions.
+                $entities[] = [
+                    'entity_id' => 'sensor_' . $varId,
+                    'entity_type' => 'sensor',
+                    'attributes' => [
+                        'value' => (string)$result['value'],
+                        'unit' => (string)$result['unit'],
+                        'state' => 'ON'
+                    ]
+                ];
             }
         }
 
@@ -2260,7 +2301,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 }
 
                 $attributes = [];
-                $entityId = 'mediaplayer_' . $entry['instance_id'];
+                $entityId = 'media_player_' . $entry['instance_id'];
                 $stateSet = false;
 
                 foreach ($entry['features'] as $feature) {
@@ -2347,7 +2388,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'msg' => 'entity_states',
             'msg_data' => $entities
         ];
-        // $this->SendDebug(__FUNCTION__, "📤 Sende Antwort an RemoteClient (req_id: $reqId)", 0);
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_IO, '📤 entity_states count=' . count($entities), 0);
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_IO, '📤 entity_states payload: ' . json_encode($entities), 0);
         $this->PushToRemoteClient($response, $clientIP, $clientPort);
         // $this->SendDebug(__FUNCTION__, "✅ SendEntityStates abgeschlossen", 0);
     }
