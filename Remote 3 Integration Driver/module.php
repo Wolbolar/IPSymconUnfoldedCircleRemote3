@@ -846,7 +846,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                                 $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($entry['color_temp_var_id'], $ctVal);
                             }
                             if (!empty($entry['color_var_id']) && @IPS_VariableExists($entry['color_var_id'])) {
-                                $result = $this->ConvertHexColorToHueSaturation($entry['color_var_id']);
+                                $rawColor = @GetValue($entry['color_var_id']);
+                                $result = $this->ConvertHexColorToHueSaturation((int)$rawColor);
                                 if (is_array($result)) {
                                     $attributes['hue'] = $result['hue'];
                                     $attributes['saturation'] = $result['saturation'];
@@ -2221,8 +2222,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     if (!empty($entry['brightness_var_id']) && @IPS_VariableExists($entry['brightness_var_id'])) {
                         $attributes[Entity_Light::ATTR_BRIGHTNESS] = $this->ConvertBrightnessToRemote($entry['brightness_var_id']);
                     }
-                    if (!empty($entry['color_temp_var_id']) && @IPS_VariableExists($entry['color_temp_var_id'])) {
-                        $attributes[Entity_Light::ATTR_COLOR_TEMPERATURE] = @GetValue($entry['color_temp_var_id']);
+                    if (!empty($entry['color_temp_var_id']) && @IPS_VariableExists((int)$entry['color_temp_var_id'])) {
+                        $ctVarId = (int)$entry['color_temp_var_id'];
+                        $ctVal = @GetValue($ctVarId);
+                        $attributes[Entity_Light::ATTR_COLOR_TEMPERATURE] = $this->ConvertColorTemperatureToRemote($ctVarId, $ctVal);
                     }
                     if (!empty($entry['color_var_id']) && @IPS_VariableExists($entry['color_var_id'])) {
                         $hex = @GetValue($entry['color_var_id']);
@@ -3993,11 +3996,31 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $remoteValue = (int)$params['color_temperature'];
             $symconValue = $this->ConvertColorTemperatureFromRemote($color_temp_var_id, $remoteValue);
 
-            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY,
-                "✅ Set color temperature remote=$remoteValue → symcon=" . json_encode($symconValue), 0);
+            // RequestAction must receive the correct PHP type for the target variable.
+            $varInfo = IPS_GetVariable((int)$color_temp_var_id);
+            $varType = (int)($varInfo['VariableType'] ?? 1); // 1=int, 2=float
+            $requestValue = ($varType === 2) ? (float)$symconValue : (int)round($symconValue);
 
-            RequestAction($color_temp_var_id, $symconValue);
+            $beforeValue = @GetValue((int)$color_temp_var_id);
+            $this->Debug(
+                __FUNCTION__,
+                self::LV_TRACE,
+                self::TOPIC_ENTITY,
+                "✅ Set color temperature VarID $color_temp_var_id | remote=$remoteValue → symcon=" . json_encode($requestValue) . " | before=" . json_encode($beforeValue),
+                0
+            );
+
+            RequestAction((int)$color_temp_var_id, $requestValue);
             usleep(10000);
+
+            $afterValue = @GetValue((int)$color_temp_var_id);
+            $this->Debug(
+                __FUNCTION__,
+                self::LV_TRACE,
+                self::TOPIC_ENTITY,
+                "🌡️ Color temperature write result VarID $color_temp_var_id | after=" . json_encode($afterValue),
+                0
+            );
         }
 
         if ((isset($params['hue']) || isset($params['saturation'])) && $color_var_id && IPS_VariableExists($color_var_id)) {
@@ -4733,7 +4756,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             $lightMapping = json_decode($this->ReadPropertyString('light_mapping'), true);
             if (is_array($lightMapping)) {
                 foreach ($lightMapping as $entry) {
-                    if ('light_' . ($entry['switch_var_id'] ?? '') === $entityId) {
+                    if ('light_' . ($entry['instance_id'] ?? '') === $entityId) {
                         if (!empty($entry['color_var_id']) && @IPS_VariableExists($entry['color_var_id'])) {
                             $hex = @GetValue($entry['color_var_id']);
                             $hs = $this->ConvertHexColorToHueSaturation((int)$hex);
@@ -4884,39 +4907,63 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $lightMapping = json_decode($this->ReadPropertyString('light_mapping'), true);
         if (is_array($lightMapping)) {
             foreach ($lightMapping as $entry) {
-                if (!isset($entry['switch_var_id']) || (int)$entry['switch_var_id'] !== $varId) {
+                $switchVarId = isset($entry['switch_var_id']) ? (int)$entry['switch_var_id'] : 0;
+                $brightnessVarId = isset($entry['brightness_var_id']) ? (int)$entry['brightness_var_id'] : 0;
+                $colorVarId = isset($entry['color_var_id']) ? (int)$entry['color_var_id'] : 0;
+                $colorTempVarId = isset($entry['color_temp_var_id']) ? (int)$entry['color_temp_var_id'] : 0;
+
+                // React not only to switch updates, but also to brightness/color/color temperature updates.
+                if ($varId !== $switchVarId && $varId !== $brightnessVarId && $varId !== $colorVarId && $varId !== $colorTempVarId) {
                     continue;
                 }
-                $value = @GetValue($varId);
-                $state = $value ? 'ON' : 'OFF';
-                $attributes = ['state' => $state];
 
-                if (!empty($entry['brightness_var_id']) && IPS_VariableExists($entry['brightness_var_id'])) {
-                    $attributes['brightness'] = $this->ConvertBrightnessToRemote($entry['brightness_var_id']);
+                $attributes = [];
+
+                if ($switchVarId > 0 && @IPS_VariableExists($switchVarId)) {
+                    $switchValue = @GetValue($switchVarId);
+                    $attributes['state'] = $switchValue ? 'ON' : 'OFF';
+                } else {
+                    $attributes['state'] = 'OFF';
                 }
-                if (!empty($entry['color_var_id']) && IPS_VariableExists($entry['color_var_id'])) {
-                    $color = json_decode(@GetValue($entry['color_var_id']), true);
-                    if (is_array($color)) {
-                        $attributes['hue'] = $color['hue'] ?? 0;
-                        $attributes['saturation'] = $color['saturation'] ?? 0;
+
+                if ($brightnessVarId > 0 && @IPS_VariableExists($brightnessVarId)) {
+                    $attributes['brightness'] = $this->ConvertBrightnessToRemote($brightnessVarId);
+                }
+
+                if ($colorVarId > 0 && @IPS_VariableExists($colorVarId)) {
+                    $rawColor = @GetValue($colorVarId);
+
+                    if (is_numeric($rawColor)) {
+                        $hs = $this->ConvertHexColorToHueSaturation((int)$rawColor);
+                        $attributes['hue'] = $hs['hue'];
+                        $attributes['saturation'] = $hs['saturation'];
+                    } else {
+                        $color = json_decode((string)$rawColor, true);
+                        if (is_array($color)) {
+                            $attributes['hue'] = (int)($color['hue'] ?? 0);
+                            $attributes['saturation'] = (int)($color['saturation'] ?? 0);
+                        }
                     }
                 }
-                if (!empty($entry['color_temp_var_id']) && IPS_VariableExists($entry['color_temp_var_id'])) {
-                    $ctVal = GetValue($entry['color_temp_var_id']);
-                    $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($entry['color_temp_var_id'], $ctVal);
+
+                if ($colorTempVarId > 0 && @IPS_VariableExists($colorTempVarId)) {
+                    $ctVal = @GetValue($colorTempVarId);
+                    $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($colorTempVarId, $ctVal);
                 }
 
+                $eid = 'light_' . (string)($entry['instance_id'] ?? $switchVarId ?: $varId);
                 $event = [
                     'kind' => 'event',
                     'msg' => 'entity_change',
                     'cat' => 'ENTITY',
                     'msg_data' => [
                         'entity_type' => 'light',
-                        'entity_id' => 'light_' . $varId,
+                        'entity_id' => $eid,
                         'attributes' => $attributes
                     ]
                 ];
-                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for light VarID $varId", 0);
+
+                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for light $eid (trigger VarID $varId) | " . json_encode($attributes), 0);
                 $this->BroadcastEventToClients($event);
                 return;
             }
@@ -5337,24 +5384,37 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         continue;
                     }
 
-                    $value = @GetValue($light['switch_var_id']);
+                    $switchVarId = (int)$light['switch_var_id'];
+                    $instanceId = (string)($light['instance_id'] ?? $switchVarId);
+
+                    $value = @GetValue($switchVarId);
                     $state = $value ? 'ON' : 'OFF';
                     $attributes = ['state' => $state];
 
-                    if (!empty($light['brightness_var_id']) && IPS_VariableExists($light['brightness_var_id'])) {
-                        $attributes['brightness'] = (int)@GetValue($light['brightness_var_id']);
+                    if (!empty($light['brightness_var_id']) && @IPS_VariableExists((int)$light['brightness_var_id'])) {
+                        $attributes['brightness'] = $this->ConvertBrightnessToRemote((int)$light['brightness_var_id']);
                     }
 
-                    if (!empty($light['color_var_id']) && IPS_VariableExists($light['color_var_id'])) {
-                        $color = json_decode(@GetValue($light['color_var_id']), true);
-                        if (is_array($color)) {
-                            $attributes['hue'] = $color['hue'] ?? 0;
-                            $attributes['saturation'] = $color['saturation'] ?? 0;
+                    if (!empty($light['color_var_id']) && @IPS_VariableExists((int)$light['color_var_id'])) {
+                        $rawColor = @GetValue((int)$light['color_var_id']);
+
+                        if (is_numeric($rawColor)) {
+                            $hs = $this->ConvertHexColorToHueSaturation((int)$rawColor);
+                            $attributes['hue'] = $hs['hue'];
+                            $attributes['saturation'] = $hs['saturation'];
+                        } else {
+                            $color = json_decode((string)$rawColor, true);
+                            if (is_array($color)) {
+                                $attributes['hue'] = (int)($color['hue'] ?? 0);
+                                $attributes['saturation'] = (int)($color['saturation'] ?? 0);
+                            }
                         }
                     }
 
-                    if (!empty($light['color_temp_var_id']) && IPS_VariableExists($light['color_temp_var_id'])) {
-                        $attributes['color_temperature'] = (int)@GetValue($light['color_temp_var_id']);
+                    if (!empty($light['color_temp_var_id']) && @IPS_VariableExists((int)$light['color_temp_var_id'])) {
+                        $ctVarId = (int)$light['color_temp_var_id'];
+                        $ctVal = @GetValue($ctVarId);
+                        $attributes['color_temperature'] = $this->ConvertColorTemperatureToRemote($ctVarId, $ctVal);
                     }
 
                     $event = [
@@ -5363,12 +5423,147 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         'cat' => 'ENTITY',
                         'msg_data' => [
                             'entity_type' => 'light',
-                            'entity_id' => 'light_' . $light['switch_var_id'],
+                            'entity_id' => 'light_' . $instanceId,
                             'attributes' => $attributes
                         ]
                     ];
 
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for light_{$light['switch_var_id']} to $clientIP:$port", 0);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for light_$instanceId to $clientIP:$port | " . json_encode($attributes), 0);
+                    $this->PushToRemoteClient($event, $clientIP, $port);
+                }
+            }
+
+            // Klima-Geräte melden sich online
+            $climateMapping = json_decode($this->ReadPropertyString('climate_mapping'), true);
+            if (is_array($climateMapping)) {
+                foreach ($climateMapping as $climate) {
+                    if (!isset($climate['status_var_id']) || !is_numeric($climate['status_var_id'])) {
+                        continue;
+                    }
+
+                    $statusVarId = (int)$climate['status_var_id'];
+                    if (!@IPS_VariableExists($statusVarId)) {
+                        continue;
+                    }
+
+                    $instanceId = (string)($climate['instance_id'] ?? $statusVarId);
+                    $statusRaw = @GetValue($statusVarId);
+
+                    $attributes = [
+                        'state' => $this->NormalizeOnOffState($statusVarId, $statusRaw)
+                    ];
+
+                    if (!empty($climate['current_temp_var_id']) && @IPS_VariableExists((int)$climate['current_temp_var_id'])) {
+                        $attributes['current_temperature'] = (float)@GetValue((int)$climate['current_temp_var_id']);
+                    }
+
+                    if (!empty($climate['target_temp_var_id']) && @IPS_VariableExists((int)$climate['target_temp_var_id'])) {
+                        $attributes['target_temperature'] = (float)@GetValue((int)$climate['target_temp_var_id']);
+                    }
+
+                    if (!empty($climate['mode_var_id']) && @IPS_VariableExists((int)$climate['mode_var_id'])) {
+                        $modeVarId = (int)$climate['mode_var_id'];
+                        $modeVal = @GetValue($modeVarId);
+                        $modeLabel = $this->GetProfileValueLabel($modeVarId, $modeVal);
+                        $allowedModes = ['HEAT', 'COOL', 'HEAT_COOL', 'FAN', 'AUTO', 'OFF'];
+                        if (in_array($modeLabel, $allowedModes, true)) {
+                            if (class_exists('Entity_Climate') && defined('Entity_Climate::ATTR_HVAC_MODE')) {
+                                $attributes[Entity_Climate::ATTR_HVAC_MODE] = $modeLabel;
+                            } else {
+                                $attributes['hvac_mode'] = $modeLabel;
+                            }
+                        }
+                    }
+
+                    $event = [
+                        'kind' => 'event',
+                        'msg' => 'entity_change',
+                        'cat' => 'ENTITY',
+                        'msg_data' => [
+                            'entity_type' => 'climate',
+                            'entity_id' => 'climate_' . $instanceId,
+                            'attributes' => $attributes
+                        ]
+                    ];
+
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for climate_$instanceId to $clientIP:$port | " . json_encode($attributes), 0);
+                    $this->PushToRemoteClient($event, $clientIP, $port);
+                }
+            }
+
+            // Media-Player melden sich online
+            $mediaMapping = json_decode($this->ReadPropertyString('media_player_mapping'), true);
+            if (is_array($mediaMapping)) {
+                foreach ($mediaMapping as $media) {
+                    if (!isset($media['instance_id']) || empty($media['instance_id'])) {
+                        continue;
+                    }
+                    if (!isset($media['features']) || !is_array($media['features'])) {
+                        continue;
+                    }
+
+                    $instanceId = (string)$media['instance_id'];
+                    $attributes = [];
+
+                    // Minimal-Grundgerüst: versuche den ON/OFF-Status aus bekannten Feature-Variablen abzuleiten.
+                    foreach ($media['features'] as $feature) {
+                        if (!is_array($feature) || !isset($feature['feature_key']) || !isset($feature['var_id'])) {
+                            continue;
+                        }
+
+                        $featureKey = (string)$feature['feature_key'];
+                        $featureVarId = (int)$feature['var_id'];
+                        if ($featureVarId <= 0 || !@IPS_VariableExists($featureVarId)) {
+                            continue;
+                        }
+
+                        switch ($featureKey) {
+                            case 'on_off':
+                                $attributes['state'] = @GetValue($featureVarId) ? 'ON' : 'OFF';
+                                break;
+
+                            case 'volume':
+                                $attributes['volume'] = (float)@GetValue($featureVarId);
+                                break;
+
+                            case 'muted':
+                                $attributes['muted'] = (bool)@GetValue($featureVarId);
+                                break;
+
+                            case 'media_title':
+                                $attributes['media_title'] = (string)@GetValue($featureVarId);
+                                break;
+
+                            case 'media_artist':
+                                $attributes['media_artist'] = (string)@GetValue($featureVarId);
+                                break;
+
+                            case 'media_album':
+                                $attributes['media_album'] = (string)@GetValue($featureVarId);
+                                break;
+                        }
+                    }
+
+                    // Fallback: wenn kein on_off Feature vorhanden ist, Gerät trotzdem als ON melden,
+                    // damit es in der Remote nicht vorschnell als nicht verfügbar erscheint.
+                    if (!isset($attributes['state'])) {
+                        $attributes['state'] = 'ON';
+                    }
+
+                    // TODO: Media-Player Initial-Online-Event später vollständig nach UC-Doku ausbauen
+                    // (Play/Pause-Status, Position, Duration, Source, Sound Mode, Media Type, Artwork etc.).
+                    $event = [
+                        'kind' => 'event',
+                        'msg' => 'entity_change',
+                        'cat' => 'ENTITY',
+                        'msg_data' => [
+                            'entity_type' => 'media_player',
+                            'entity_id' => 'media_player_' . $instanceId,
+                            'attributes' => $attributes
+                        ]
+                    ];
+
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for mediaplayer_$instanceId to $clientIP:$port | " . json_encode($attributes), 0);
                     $this->PushToRemoteClient($event, $clientIP, $port);
                 }
             }
