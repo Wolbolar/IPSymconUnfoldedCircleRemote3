@@ -3738,10 +3738,19 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     $attributes['state'] = $this->GetCoverMoveStateFromRemotePos($currentRemote, $targetRemote);
                     $attributes['position'] = $targetRemote;
                 } elseif ($controlVar && IPS_VariableExists($controlVar)) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Öffne Cover (RequestAction $controlVar mit 0)", 0);
-                    RequestAction($controlVar, 0); // legacy mapping
-                    $attributes['state'] = 'OPENING';
-                    $attributes['position'] = 100;
+                    $value = $this->GetProfileValueByLabel($controlVar, 'öffn');
+                    if ($value === null) {
+                        $value = $this->GetProfileValueByLabel($controlVar, 'open');
+                    }
+
+                    if ($value !== null) {
+                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Öffne Cover (RequestAction $controlVar mit Profilwert $value)", 0);
+                        RequestAction($controlVar, $value);
+                        $attributes['state'] = 'OPENING';
+                        $attributes['position'] = 100;
+                    } else {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Kein passender OPEN Wert im Variablenprofil gefunden", 0);
+                    }
                 } else {
                     $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Keine gültige Variable für open (positionVar/controlVar)", 0);
                 }
@@ -3757,10 +3766,19 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     $attributes['state'] = $this->GetCoverMoveStateFromRemotePos($currentRemote, $targetRemote);
                     $attributes['position'] = $targetRemote;
                 } elseif ($controlVar && IPS_VariableExists($controlVar)) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Schließe Cover (RequestAction $controlVar mit 2)", 0);
-                    RequestAction($controlVar, 2); // legacy mapping
-                    $attributes['state'] = 'CLOSING';
-                    $attributes['position'] = 0;
+                    $value = $this->GetProfileValueByLabel($controlVar, 'schließ');
+                    if ($value === null) {
+                        $value = $this->GetProfileValueByLabel($controlVar, 'close');
+                    }
+
+                    if ($value !== null) {
+                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Schließe Cover (RequestAction $controlVar mit Profilwert $value)", 0);
+                        RequestAction($controlVar, $value);
+                        $attributes['state'] = 'CLOSING';
+                        $attributes['position'] = 0;
+                    } else {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Kein passender CLOSE Wert im Variablenprofil gefunden", 0);
+                    }
                 } else {
                     $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Keine gültige Variable für close (positionVar/controlVar)", 0);
                 }
@@ -3768,8 +3786,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             case 'stop':
                 if ($controlVar && IPS_VariableExists($controlVar)) {
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Stoppe Cover (RequestAction $controlVar mit 1)", 0);
-                    RequestAction($controlVar, 1); // legacy mapping
+                    $value = $this->GetProfileValueByLabel($controlVar, 'stop');
+
+                    if ($value !== null) {
+                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Stoppe Cover (RequestAction $controlVar mit Profilwert $value)", 0);
+                        RequestAction($controlVar, $value);
+                    } else {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Kein passender STOP Wert im Variablenprofil gefunden", 0);
+                    }
                 } else {
                     $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ controlVar für stop fehlt oder existiert nicht", 0);
                 }
@@ -3814,6 +3838,46 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
         $this->SendSuccessResponse((int)$reqId, $clientIP, (int)$clientPort);
         IPS_SemaphoreLeave($lockName);
+    }
+
+    private function GetProfileValueByLabel(int $varId, string $search): ?int
+    {
+        if (!IPS_VariableExists($varId)) {
+            return null;
+        }
+
+        $var = IPS_GetVariable($varId);
+        $profile = $var['VariableCustomProfile'] ?: $var['VariableProfile'];
+
+        if (!$profile || !IPS_VariableProfileExists($profile)) {
+            return null;
+        }
+
+        $profileData = IPS_GetVariableProfile($profile);
+
+        // Normalize search keyword
+        $search = strtolower($search);
+
+        // Known keyword groups
+        $keywords = [
+            'open' => ['open', 'öffn', 'auf', 'hoch', 'up'],
+            'close' => ['close', 'schließ', 'zu', 'down', 'runter'],
+            'stop' => ['stop', 'halt', 'stopp']
+        ];
+
+        $searchTerms = $keywords[$search] ?? [$search];
+
+        foreach ($profileData['Associations'] as $assoc) {
+            $label = strtolower((string)$assoc['Name']);
+
+            foreach ($searchTerms as $term) {
+                if (strpos($label, $term) !== false) {
+                    return (int)$assoc['Value'];
+                }
+            }
+        }
+
+        return null;
     }
 
     private function HandleIREmitterCommand(array $msgData, $clientIP, $clientPort, $reqId): void
