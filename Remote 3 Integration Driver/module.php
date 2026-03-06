@@ -138,6 +138,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         $this->RegisterPropertyString('device_popup', '[]');
 
+        $this->RegisterAttributeString('media_player_cache', '{}');
+
         // use Attributes instead
         /*
         $this->RegisterPropertyString('popup_button_suggestions', '[]');
@@ -864,66 +866,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             continue 2;
                         }
 
-                        $attributes = [];
-                        $instanceId = $entry['instance_id'] ?? 0;
-                        if ($instanceId === 0) {
+                        $instanceId = (string)($entry['instance_id'] ?? '');
+                        if ($instanceId === '') {
                             $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Missing instance_id for media entry: " . json_encode($entry), 0);
                             continue 2;
                         }
 
                         $entityId = 'media_player_' . $instanceId;
-                        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, "🎵 Processing media player: $entityId", 0);
+                        $attributes = $this->BuildMediaPlayerAttributesFromFeatures($entry);
 
-                        $stateSet = false;
-
-                        foreach ($entry['features'] as $feature) {
-                            $varId = $feature['var_id'] ?? 0;
-                            $key = $feature['feature_key'] ?? null;
-
-                            if ($varId <= 0 || !$key || !@IPS_VariableExists($varId)) {
-                                // $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Überspringe ungültiges Feature: " . json_encode($entry), 0);
-                                continue;
-                            }
-
-                            $value = @GetValue($varId);
-                            switch ($key) {
-                                case 'media_duration':
-                                case 'media_position':
-                                    if (is_string($value)) {
-                                        $parts = explode(':', $value);
-                                        if (count($parts) === 2) {
-                                            $value = ((int)$parts[0] * 60) + (int)$parts[1];
-                                        } elseif (count($parts) === 3) {
-                                            $value = ((int)$parts[0] * 3600) + ((int)$parts[1] * 60) + (int)$parts[2];
-                                        } else {
-                                            $value = 0;
-                                        }
-                                    }
-                                    $attributes[$key] = $value;
-                                    break;
-
-                                case 'on_off':
-                                    $attributes['state'] = $value ? 'ON' : 'OFF';
-                                    $stateSet = true;
-                                    break;
-
-                                case 'symcon_control':
-                                    $attributes['state'] = $this->GetMediaPlayerStateFromControlVariable($varId);
-                                    $stateSet = true;
-                                    break;
-
-                                default:
-                                    $attributes[$key] = $value;
-                                    break;
-                            }
-                        }
-
-                        if (!$stateSet) {
-                            $attributes['state'] = 'ON'; // Fallback
-                            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "ℹ️ No state feature present, setting 'state' to ON", 0);
-                        }
-
-                        // $this->SendDebug(__FUNCTION__, "📤 Sende Entity für Media Player $entityId: " . json_encode($attributes), 0);
+                        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, "🎵 Processing media player: $entityId | " . json_encode($attributes), 0);
                         $this->SendEntityChange($entityId, 'media_player', $attributes);
                         break;
 
@@ -2357,84 +2309,22 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $mediaMapping = json_decode($this->ReadPropertyString('media_player_mapping'), true);
         if (is_array($mediaMapping)) {
             $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_IO, "🔍 Verarbeite Media Player-Mapping...", 0);
+
             foreach ($mediaMapping as $entry) {
-                if (!isset($entry['instance_id']) || !isset($entry['name']) || !isset($entry['features']) || !is_array($entry['features'])) {
+                if (!isset($entry['instance_id']) || !isset($entry['features']) || !is_array($entry['features'])) {
                     $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_IO, "⚠️ Ungültiger Eintrag im Media Mapping übersprungen: " . json_encode($entry), 0);
                     continue;
                 }
 
-                $attributes = [];
-                $entityId = 'media_player_' . $entry['instance_id'];
-                $stateSet = false;
-
-                foreach ($entry['features'] as $feature) {
-                    if (!isset($feature['feature_key']) || !isset($feature['var_id']) || !$feature['var_id']) {
-                        continue;
-                    }
-
-                    $key = $feature['feature_key'];
-                    $varId = (int)$feature['var_id'];
-
-                    if (!IPS_VariableExists($varId)) {
-                        continue;
-                    }
-
-                    $value = @GetValue($varId);
-
-                    switch ($key) {
-                        case 'on_off':
-                            $attributes[Entity_Media_Player::ATTR_STATE] = $value ? 'ON' : 'OFF';
-                            $stateSet = true;
-                            break;
-                        case 'symcon_control':
-                            $attributes[Entity_Media_Player::ATTR_STATE] = $this->GetMediaPlayerStateFromControlVariable($varId);
-                            $stateSet = true;
-                            break;
-                        case 'volume':
-                            $attributes[Entity_Media_Player::ATTR_VOLUME] = (float)$value;
-                            break;
-                        case 'muted':
-                            $attributes[Entity_Media_Player::ATTR_MUTED] = (bool)$value;
-                            break;
-                        case 'repeat':
-                            $attributes[Entity_Media_Player::ATTR_REPEAT] = (bool)$value;
-                            break;
-                        case 'shuffle':
-                            $attributes[Entity_Media_Player::ATTR_SHUFFLE] = (bool)$value;
-                            break;
-                        case 'media_title':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_TITLE] = $value;
-                            break;
-                        case 'media_artist':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_ARTIST] = $value;
-                            break;
-                        case 'media_album':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_ALBUM] = $value;
-                            break;
-                        case 'media_duration':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_DURATION] = $this->ConvertTimeStringToSeconds($value);
-                            break;
-                        case 'media_position':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_POSITION] = $this->ConvertTimeStringToSeconds($value);
-                            break;
-                        case 'media_image_url':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_IMAGE_URL] = $value;
-                            break;
-                        case 'media_type':
-                            $attributes[Entity_Media_Player::ATTR_MEDIA_TYPE] = $value;
-                            break;
-                        case 'source':
-                            $attributes[Entity_Media_Player::ATTR_SOURCE] = $value;
-                            break;
-                        case 'sound_mode':
-                            $attributes[Entity_Media_Player::ATTR_SOUND_MODE] = $value;
-                            break;
-                    }
+                $instanceId = (string)$entry['instance_id'];
+                if ($instanceId === '') {
+                    continue;
                 }
 
-                if (!$stateSet) {
-                    $attributes[Entity_Media_Player::ATTR_STATE] = 'ON'; // Fallback-Zustand
-                }
+                $entityId = 'media_player_' . $instanceId;
+
+                // Use unified helper (includes cache / fallback logic)
+                $attributes = $this->BuildMediaPlayerAttributesFromFeatures($entry);
 
                 $entities[] = [
                     'entity_id' => $entityId,
@@ -5112,99 +5002,209 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         continue;
                     }
 
-                    $attributes = [];
-                    $entityId = null;
-
-                    foreach ($entry['features'] as $f) {
-                        if (!isset($f['feature_key']) || !isset($f['var_id'])) {
-                            continue;
-                        }
-
-                        $fKey = $f['feature_key'];
-                        $fVar = $f['var_id'];
-
-                        if (!IPS_VariableExists($fVar)) {
-                            continue;
-                        }
-
-                        $val = @GetValue($fVar);
-
-                        switch ($fKey) {
-                            case 'on_off':
-                                $attributes['state'] = $val ? 'ON' : 'OFF';
-                                $entityId = 'mediaplayer_' . $fVar;
-                                break;
-                            case 'symcon_control':
-                                if (method_exists($this, 'GetMediaPlayerStateFromControlVariable')) {
-                                    $attributes['state'] = $this->GetMediaPlayerStateFromControlVariable($fVar);
-                                }
-                                break;
-                            case 'volume':
-                                $attributes['volume'] = (float)$val;
-                                break;
-                            case 'muted':
-                                $attributes['muted'] = (bool)$val;
-                                break;
-                            case 'repeat':
-                                $attributes['repeat'] = (bool)$val;
-                                break;
-                            case 'shuffle':
-                                $attributes['shuffle'] = (bool)$val;
-                                break;
-                            case 'media_title':
-                                $attributes['media_title'] = $val;
-                                break;
-                            case 'media_artist':
-                                $attributes['media_artist'] = $val;
-                                break;
-                            case 'media_album':
-                                $attributes['media_album'] = $val;
-                                break;
-                            case 'media_duration':
-                                if (method_exists($this, 'ConvertTimeStringToSeconds')) {
-                                    $attributes['media_duration'] = $this->ConvertTimeStringToSeconds($val);
-                                }
-                                break;
-                            case 'media_position':
-                                if (method_exists($this, 'ConvertTimeStringToSeconds')) {
-                                    $attributes['media_position'] = $this->ConvertTimeStringToSeconds($val);
-                                }
-                                break;
-                            case 'media_image_url':
-                                $attributes['media_image_url'] = $val;
-                                break;
-                            case 'media_type':
-                                $attributes['media_type'] = $val;
-                                break;
-                            case 'source':
-                                $attributes['source'] = $val;
-                                break;
-                            case 'sound_mode':
-                                $attributes['sound_mode'] = $val;
-                                break;
-                        }
+                    $instanceId = (string)($entry['instance_id'] ?? '');
+                    if ($instanceId === '') {
+                        continue;
                     }
 
-                    if (!empty($entityId)) {
-                        $event = [
-                            'kind' => 'event',
-                            'msg' => 'entity_change',
-                            'cat' => 'ENTITY',
-                            'msg_data' => [
-                                'entity_type' => 'media_player',
-                                'entity_id' => $entityId,
-                                'attributes' => $attributes
-                            ]
-                        ];
-                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for media player $entityId", 0);
-                        $this->BroadcastEventToClients($event);
-                        return;
-                    }
+                    $attributes = $this->BuildMediaPlayerAttributesFromFeatures($entry);
+                    $entityId = 'media_player_' . $instanceId;
+
+                    $event = [
+                        'kind' => 'event',
+                        'msg' => 'entity_change',
+                        'cat' => 'ENTITY',
+                        'msg_data' => [
+                            'entity_type' => 'media_player',
+                            'entity_id' => $entityId,
+                            'attributes' => $attributes
+                        ]
+                    ];
+
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for media player $entityId (VarID $varId) | " . json_encode($attributes), 0);
+                    $this->BroadcastEventToClients($event);
+                    return;
                 }
             }
         }
 
         $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ No mapping found for VarID $varId", 0);
+    }
+
+    private function ReadMediaPlayerCache(): array
+    {
+        $raw = $this->ReadAttributeString('media_player_cache');
+        $data = json_decode($raw, true);
+        return is_array($data) ? $data : [];
+    }
+
+    private function WriteMediaPlayerCache(array $cache): void
+    {
+        $this->WriteAttributeString('media_player_cache', json_encode($cache));
+    }
+
+    private function IsMediaCacheEmptyValue($value): bool
+    {
+        if ($value === null) {
+            return true;
+        }
+        if (is_string($value)) {
+            return trim($value) === '';
+        }
+        return false;
+    }
+
+    private function UpdateMediaPlayerCacheValue(string $instanceId, string $key, $value): void
+    {
+        if ($instanceId === '' || $key === '' || $this->IsMediaCacheEmptyValue($value)) {
+            return;
+        }
+
+        $cache = $this->ReadMediaPlayerCache();
+        if (!isset($cache[$instanceId]) || !is_array($cache[$instanceId])) {
+            $cache[$instanceId] = [];
+        }
+
+        $cache[$instanceId][$key] = $value;
+        $this->WriteMediaPlayerCache($cache);
+    }
+
+    private function GetMediaPlayerLiveOrCachedValue(string $instanceId, string $key, ?int $varId)
+    {
+        $liveValue = null;
+
+        if (!empty($varId) && @IPS_VariableExists($varId)) {
+            $liveValue = @GetValue($varId);
+
+            if (!$this->IsMediaCacheEmptyValue($liveValue)) {
+                $this->UpdateMediaPlayerCacheValue($instanceId, $key, $liveValue);
+                return $liveValue;
+            }
+        }
+
+        $cache = $this->ReadMediaPlayerCache();
+        if (isset($cache[$instanceId]) && is_array($cache[$instanceId]) && array_key_exists($key, $cache[$instanceId])) {
+            return $cache[$instanceId][$key];
+        }
+
+        return $liveValue;
+    }
+
+    private function GetComputedMediaPlayerPosition(string $instanceId, $positionValue, $durationValue, string $state): ?float
+    {
+        $cache = $this->ReadMediaPlayerCache();
+        if (!isset($cache[$instanceId]) || !is_array($cache[$instanceId])) {
+            $cache[$instanceId] = [];
+        }
+
+        $now = time();
+
+        if ($positionValue !== null && $positionValue !== '') {
+            $cache[$instanceId]['media_position'] = (float)$positionValue;
+            $cache[$instanceId]['last_position_ts'] = $now;
+        }
+
+        if ($durationValue !== null && $durationValue !== '') {
+            $cache[$instanceId]['media_duration'] = (float)$durationValue;
+        }
+
+        $cache[$instanceId]['last_state'] = $state;
+        $this->WriteMediaPlayerCache($cache);
+
+        $basePos = (float)($cache[$instanceId]['media_position'] ?? 0);
+        $baseTs = (int)($cache[$instanceId]['last_position_ts'] ?? $now);
+        $duration = (float)($cache[$instanceId]['media_duration'] ?? 0);
+
+        if ($state === 'PLAYING') {
+            $computed = $basePos + max(0, $now - $baseTs);
+            if ($duration > 0) {
+                $computed = min($computed, $duration);
+            }
+            return $computed;
+        }
+
+        return $basePos;
+    }
+
+    private function BuildMediaPlayerAttributesFromFeatures(array $entry): array
+    {
+        $attributes = [];
+        $instanceId = (string)($entry['instance_id'] ?? '');
+        $features = $entry['features'] ?? [];
+
+        if ($instanceId === '' || !is_array($features)) {
+            return $attributes;
+        }
+
+        foreach ($features as $f) {
+            if (!is_array($f) || !isset($f['feature_key']) || !isset($f['var_id'])) {
+                continue;
+            }
+
+            $featureKey = (string)$f['feature_key'];
+            $featureVarId = (int)$f['var_id'];
+
+            if ($featureVarId <= 0 || !@IPS_VariableExists($featureVarId)) {
+                continue;
+            }
+
+            $val = @GetValue($featureVarId);
+
+            switch ($featureKey) {
+                case 'on_off':
+                    $attributes['state'] = $val ? 'ON' : 'OFF';
+                    break;
+
+                case 'volume':
+                    $attributes['volume'] = (float)$val;
+                    break;
+
+                case 'muted':
+                    $attributes['muted'] = (bool)$val;
+                    break;
+
+                case 'media_title':
+                    $cachedVal = $this->GetMediaPlayerLiveOrCachedValue($instanceId, 'media_title', $featureVarId);
+                    if (!$this->IsMediaCacheEmptyValue($cachedVal)) {
+                        $attributes['media_title'] = (string)$cachedVal;
+                    }
+                    break;
+
+                case 'media_artist':
+                    $cachedVal = $this->GetMediaPlayerLiveOrCachedValue($instanceId, 'media_artist', $featureVarId);
+                    if (!$this->IsMediaCacheEmptyValue($cachedVal)) {
+                        $attributes['media_artist'] = (string)$cachedVal;
+                    }
+                    break;
+
+                case 'media_album':
+                    $cachedVal = $this->GetMediaPlayerLiveOrCachedValue($instanceId, 'media_album', $featureVarId);
+                    if (!$this->IsMediaCacheEmptyValue($cachedVal)) {
+                        $attributes['media_album'] = (string)$cachedVal;
+                    }
+                    break;
+
+                case 'media_image_url':
+                    $cachedVal = $this->GetMediaPlayerLiveOrCachedValue($instanceId, 'media_image_url', $featureVarId);
+                    if (!$this->IsMediaCacheEmptyValue($cachedVal)) {
+                        $attributes['media_image_url'] = (string)$cachedVal;
+                    }
+                    break;
+
+                case 'source':
+                    $cachedVal = $this->GetMediaPlayerLiveOrCachedValue($instanceId, 'source', $featureVarId);
+                    if (!$this->IsMediaCacheEmptyValue($cachedVal)) {
+                        $attributes['source'] = (string)$cachedVal;
+                    }
+                    break;
+            }
+        }
+
+        if (!isset($attributes['state'])) {
+            $attributes['state'] = 'ON';
+        }
+
+        return $attributes;
     }
 
     private function GetVariableProfileDetails(int $varId): array
@@ -5503,52 +5503,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     }
 
                     $instanceId = (string)$media['instance_id'];
-                    $attributes = [];
-
-                    // Minimal-Grundgerüst: versuche den ON/OFF-Status aus bekannten Feature-Variablen abzuleiten.
-                    foreach ($media['features'] as $feature) {
-                        if (!is_array($feature) || !isset($feature['feature_key']) || !isset($feature['var_id'])) {
-                            continue;
-                        }
-
-                        $featureKey = (string)$feature['feature_key'];
-                        $featureVarId = (int)$feature['var_id'];
-                        if ($featureVarId <= 0 || !@IPS_VariableExists($featureVarId)) {
-                            continue;
-                        }
-
-                        switch ($featureKey) {
-                            case 'on_off':
-                                $attributes['state'] = @GetValue($featureVarId) ? 'ON' : 'OFF';
-                                break;
-
-                            case 'volume':
-                                $attributes['volume'] = (float)@GetValue($featureVarId);
-                                break;
-
-                            case 'muted':
-                                $attributes['muted'] = (bool)@GetValue($featureVarId);
-                                break;
-
-                            case 'media_title':
-                                $attributes['media_title'] = (string)@GetValue($featureVarId);
-                                break;
-
-                            case 'media_artist':
-                                $attributes['media_artist'] = (string)@GetValue($featureVarId);
-                                break;
-
-                            case 'media_album':
-                                $attributes['media_album'] = (string)@GetValue($featureVarId);
-                                break;
-                        }
-                    }
-
-                    // Fallback: wenn kein on_off Feature vorhanden ist, Gerät trotzdem als ON melden,
-                    // damit es in der Remote nicht vorschnell als nicht verfügbar erscheint.
-                    if (!isset($attributes['state'])) {
-                        $attributes['state'] = 'ON';
-                    }
+                    $attributes = $this->BuildMediaPlayerAttributesFromFeatures($media);
 
                     // TODO: Media-Player Initial-Online-Event später vollständig nach UC-Doku ausbauen
                     // (Play/Pause-Status, Position, Duration, Source, Sound Mode, Media Type, Artwork etc.).
@@ -5563,7 +5518,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         ]
                     ];
 
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for mediaplayer_$instanceId to $clientIP:$port | " . json_encode($attributes), 0);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for media_player_$instanceId to $clientIP:$port | " . json_encode($attributes), 0);
                     $this->PushToRemoteClient($event, $clientIP, $port);
                 }
             }
