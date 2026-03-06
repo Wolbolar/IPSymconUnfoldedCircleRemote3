@@ -10,6 +10,7 @@ class Entity_Light
 
     // --- Features ---
     public const FEATURE_ON_OFF = 'on_off'; // The light can be turned on and off.
+    public const FEATURE_TOGGLE = 'toggle'; // Toggle support
     public const FEATURE_DIM = 'dim'; // The brightness level can be controlled.
     public const FEATURE_COLOR_TEMP = 'color_temperature'; // The color temperature can be adjusted.
     public const FEATURE_COLOR = 'color'; // The color can be changed using hue/saturation values.

@@ -39,6 +39,7 @@ class DeviceRegistry
                 'device_sub_type' => 'rgbw',
                 'features'        => [
                     Entity_Light::FEATURE_ON_OFF,
+                    Entity_Light::FEATURE_TOGGLE,
                     Entity_Light::FEATURE_DIM,
                     Entity_Light::FEATURE_COLOR,
                     Entity_Light::FEATURE_COLOR_TEMP
@@ -60,6 +61,7 @@ class DeviceRegistry
                 'device_sub_type' => 'rgbw',
                 'features'        => [
                     Entity_Light::FEATURE_ON_OFF,
+                    Entity_Light::FEATURE_TOGGLE,
                     Entity_Light::FEATURE_DIM,
                     Entity_Light::FEATURE_COLOR,
                     Entity_Light::FEATURE_COLOR_TEMP

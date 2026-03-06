@@ -1995,7 +1995,10 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     case 'light':
                         if (!isset($entry['instance_id']) && !isset($entry['switch_var_id'])) continue 2;
                         $entityId = 'light_' . $entry['instance_id'];
-                        $features = [Entity_Light::FEATURE_ON_OFF];
+                        $features = [
+                            Entity_Light::FEATURE_ON_OFF,
+                            Entity_Light::FEATURE_TOGGLE
+                        ];
                         if (!empty($entry['brightness_var_id'])) {
                             $features[] = Entity_Light::FEATURE_DIM;
                         }
