@@ -912,6 +912,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
         $varInfo = @IPS_GetVariable($varId);
         $profile = '';
+
         if (is_array($varInfo)) {
             $profile = trim((string)($varInfo['VariableCustomProfile'] ?? ''));
             if ($profile === '') {
@@ -919,19 +920,37 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
         }
 
-        // If Symcon has a profile (or any formatted representation via a profile), prefer the formatted value.
-        // This keeps formatting control (digits, decimal separator, rounding, etc.) in Symcon.
+        // Always obtain the formatted value – this respects both
+        // classic VariableProfiles and the newer Symcon variable presentation.
+        $formatted = (string)@GetValueFormatted($varId);
+
+        // --- Case 1: Classic VariableProfile ---
         if ($profile !== '' && @IPS_VariableProfileExists($profile)) {
             $profileInfo = IPS_GetVariableProfile($profile);
             $unit = trim((string)($profileInfo['Suffix'] ?? ''));
 
-            $formatted = (string)@GetValueFormatted($varId);
-
-            // GetValueFormatted() typically contains the suffix already. Keep unit separate for Remote 3:
-            // strip the profile suffix from the formatted string if it is present.
+            // Remove suffix from formatted value
             $value = $this->StripProfileSuffixFromFormattedValue($formatted, $unit);
 
             return ['value' => $value, 'unit' => $unit];
+        }
+
+        // --- Case 2: New Symcon variable presentation (no profile) ---
+        // Try to extract a unit from the formatted value
+
+        $formattedTrim = trim($formatted);
+
+        // Regex: split numeric value and trailing unit
+        if (preg_match('/^([-+]?\d+[\d.,]*)\s*(.*)$/u', $formattedTrim, $m)) {
+            $value = $m[1];
+            $unit = trim($m[2]);
+
+            // Only accept unit if it actually contains letters or symbols
+            if ($unit === '' || preg_match('/^[\d.,]+$/', $unit)) {
+                $unit = '';
+            }
+        } else {
+            $value = $formattedTrim;
         }
 
         return ['value' => $value, 'unit' => $unit];
@@ -4765,29 +4784,29 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 if (!isset($entry['var_id']) || (int)$entry['var_id'] !== $varId) {
                     continue;
                 }
+
                 $sensorType = $entry['sensor_type'] ?? 'generic';
-                $value = @GetValue($varId);
-                $unit = '';
-                // Versuche Einheit aus Profil abzuleiten
-                $v = IPS_GetVariable($varId);
-                $profile = $v['VariableCustomProfile'] ?: $v['VariableProfile'];
-                if ($profile) {
-                    $profileDetails = IPS_GetVariableProfile($profile);
-                    $unit = $profileDetails['Suffix'] ?? '';
-                }
+                $result = $this->GetSensorValueAndUnit($varId);
+                $value = $result['value'];
+                $unit = $result['unit'];
+                $instanceId = (string)$varId; // Sensoren verwenden var_id damit mehrere Datenpunkte möglich sind
+
                 $event = [
                     'kind' => 'event',
                     'msg' => 'entity_change',
                     'cat' => 'ENTITY',
                     'msg_data' => [
                         'entity_type' => 'sensor',
-                        'entity_id' => 'sensor_' . $varId,
+                        'entity_id' => 'sensor_' . $instanceId,
                         'attributes' => [
+                            'state' => 'ON',
                             'value' => $value,
                             'unit' => $unit
                         ]
                     ]
                 ];
+
+                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Entity change for sensor_{$instanceId} (VarID $varId, type $sensorType) | value=" . json_encode($value) . " unit=" . json_encode($unit), 0);
                 $this->BroadcastEventToClients($event);
                 return;
             }
@@ -5319,14 +5338,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     if (!isset($sensor['var_id'])) {
                         continue;
                     }
-                    $value = @GetValue($sensor['var_id']);
-                    $unit = '';
-                    $v = IPS_GetVariable($sensor['var_id']);
-                    $profile = $v['VariableCustomProfile'] ?: $v['VariableProfile'];
-                    if ($profile && IPS_VariableProfileExists($profile)) {
-                        $profileDetails = IPS_GetVariableProfile($profile);
-                        $unit = $profileDetails['Suffix'] ?? '';
+
+                    $varId = (int)$sensor['var_id'];
+                    if (!@IPS_VariableExists($varId)) {
+                        continue;
                     }
+
+                    $instanceId = (string)$varId; // Sensoren nutzen var_id als eindeutige entity_id
+                    $result = $this->GetSensorValueAndUnit($varId);
+                    $value = $result['value'];
+                    $unit = $result['unit'];
 
                     $event = [
                         'kind' => 'event',
@@ -5334,7 +5355,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         'cat' => 'ENTITY',
                         'msg_data' => [
                             'entity_type' => 'sensor',
-                            'entity_id' => 'sensor_' . $sensor['var_id'],
+                            'entity_id' => 'sensor_' . $instanceId,
                             'attributes' => [
                                 'state' => 'ON',
                                 'value' => $value,
@@ -5343,7 +5364,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         ]
                     ];
 
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for sensor_{$sensor['var_id']} to $clientIP:$port", 0);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for sensor_{$instanceId} to $clientIP:$port | value=" . json_encode($value) . " unit=" . json_encode($unit), 0);
                     $this->PushToRemoteClient($event, $clientIP, $port);
                 }
             }
