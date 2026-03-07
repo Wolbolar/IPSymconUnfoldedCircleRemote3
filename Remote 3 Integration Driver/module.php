@@ -4695,8 +4695,15 @@ class Remote3IntegrationDriver extends IPSModuleStrict
     {
         $entityId = $msgData['entity_id'] ?? '';
         $cmdId = $msgData['cmd_id'] ?? '';
+        $params = $msgData['params'] ?? [];
 
-        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 MediaPlayer-Command: $cmdId for $entityId", 0);
+        $this->Debug(
+            __FUNCTION__,
+            self::LV_TRACE,
+            self::TOPIC_ENTITY,
+            "🎵 MediaPlayer-Command: $cmdId for $entityId | params=" . json_encode($params),
+            0
+        );
 
         if (preg_match('/_(\d+)$/', $entityId, $match)) {
             $objectId = (int)$match[1];
@@ -4712,6 +4719,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         }
 
         $mapping = json_decode($this->ReadPropertyString('media_player_mapping'), true);
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 media_player_mapping=" . json_encode($mapping), 0);
         $found = null;
         foreach ($mapping as $entry) {
             if (!isset($entry['features']) || !is_array($entry['features'])) {
@@ -4740,53 +4748,98 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 $featureMap[$feature['feature_key']] = $feature['var_id'];
             }
         }
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 Matched media player entry=" . json_encode($found), 0);
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 Feature map=" . json_encode($featureMap), 0);
 
         switch ($cmdId) {
             case 'on':
             case 'off':
             case 'toggle':
                 if (isset($featureMap['on_off'])) {
-                    $newValue = ($cmdId === 'toggle') ? !GetValue($featureMap['on_off']) : ($cmdId === 'on');
-                    RequestAction($featureMap['on_off'], $newValue);
+                    $varId = (int)$featureMap['on_off'];
+                    $currentValue = @GetValue($varId);
+                    $newValue = ($cmdId === 'toggle') ? !$currentValue : ($cmdId === 'on');
+
+                    $this->Debug(
+                        __FUNCTION__,
+                        self::LV_TRACE,
+                        self::TOPIC_ENTITY,
+                        "🎵 Command $cmdId uses feature on_off | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($newValue),
+                        0
+                    );
+
+                    RequestAction($varId, $newValue);
+                    usleep(10000);
+
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(
+                        __FUNCTION__,
+                        self::LV_TRACE,
+                        self::TOPIC_ENTITY,
+                        "🎵 RequestAction executed for on_off | varId=$varId | updated=" . json_encode($updatedValue),
+                        0
+                    );
+
                     $attributes['state'] = $newValue ? 'ON' : 'OFF';
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Feature on_off is not mapped for command $cmdId", 0);
                 }
                 break;
 
             case 'play_pause':
                 if (isset($featureMap['symcon_control'])) {
-                    $varId = $featureMap['symcon_control'];
+                    $varId = (int)$featureMap['symcon_control'];
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 Command play_pause uses feature symcon_control | varId=$varId", 0);
+
                     if (IPS_VariableExists($varId)) {
                         $var = IPS_GetVariable($varId);
                         $profile = $var['VariableCustomProfile'] ?: $var['VariableProfile'];
+
+                        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | varId=$varId | profile=" . json_encode($profile), 0);
 
                         if ($profile && IPS_VariableProfileExists($profile)) {
                             $profileData = IPS_GetVariableProfile($profile);
                             $currentValue = GetValue($varId);
                             $newValue = null;
 
+                            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | currentValue=" . json_encode($currentValue) . " | associations=" . json_encode($profileData['Associations'] ?? []), 0);
+
                             foreach ($profileData['Associations'] as $assoc) {
-                                $label = strtolower($assoc['Name']);
-                                if (strpos($label, 'play') !== false && (string)$assoc['Value'] !== (string)$currentValue) {
-                                    $newValue = $assoc['Value'];
+                                $label = strtolower((string)$assoc['Name']);
+                                $assocValue = $assoc['Value'] ?? null;
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | checking association label=" . json_encode($label) . " value=" . json_encode($assocValue), 0);
+
+                                if (strpos($label, 'play') !== false && (string)$assocValue !== (string)$currentValue) {
+                                    $newValue = $assocValue;
                                     $attributes['state'] = 'PLAYING';
+                                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | selected PLAY association value=" . json_encode($newValue), 0);
                                     break;
                                 }
-                                if (strpos($label, 'pause') !== false && (string)$assoc['Value'] !== (string)$currentValue) {
-                                    $newValue = $assoc['Value'];
+                                if (strpos($label, 'pause') !== false && (string)$assocValue !== (string)$currentValue) {
+                                    $newValue = $assocValue;
                                     $attributes['state'] = 'PAUSED';
+                                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | selected PAUSE association value=" . json_encode($newValue), 0);
                                     break;
                                 }
                             }
 
                             if ($newValue !== null) {
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | RequestAction varId=$varId value=" . json_encode($newValue), 0);
                                 RequestAction($varId, $newValue);
+                                usleep(10000);
+                                $updatedValue = @GetValue($varId);
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 play_pause | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
                             } else {
-                                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⏭ No suitable alternative for play/pause found in profile", 0);
+                                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⏭ No suitable alternative for play/pause found in profile | varId=$varId | current=" . json_encode($currentValue), 0);
                             }
                         } else {
-                            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠ No valid profile available for play/pause", 0);
+                            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠ No valid profile available for play/pause | varId=$varId | profile=" . json_encode($profile), 0);
                         }
+                    } else {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠ symcon_control variable does not exist for play_pause | varId=$varId", 0);
                     }
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Feature symcon_control is not mapped for command play_pause", 0);
                 }
                 break;
 
@@ -4828,7 +4881,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             case 'fast_forward':
             case 'rewind':
                 if (isset($featureMap['symcon_control'])) {
-                    $varId = $featureMap['symcon_control'];
+                    $varId = (int)$featureMap['symcon_control'];
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 Command $cmdId uses feature symcon_control | varId=$varId", 0);
                     if (IPS_VariableExists($varId)) {
                         $var = IPS_GetVariable($varId);
                         $profile = $var['VariableCustomProfile'] ?: $var['VariableProfile'];
@@ -4836,6 +4890,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         if ($profile && IPS_VariableProfileExists($profile)) {
                             $profileData = IPS_GetVariableProfile($profile);
                             $currentValue = GetValue($varId);
+                            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | currentValue=" . json_encode($currentValue) . " | associations=" . json_encode($profileData['Associations'] ?? []), 0);
                             $newValue = null;
 
                             foreach ($profileData['Associations'] as $assoc) {
@@ -4855,7 +4910,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             }
 
                             if ($newValue !== null) {
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction varId=$varId value=" . json_encode($newValue), 0);
                                 RequestAction($varId, $newValue);
+                                usleep(10000);
+                                $updatedValue = @GetValue($varId);
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
                                 $attributes['state'] = strtoupper($cmdId);
                             } else {
                                 $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⏭ No suitable alternative for $cmdId found in profile", 0);
@@ -4872,7 +4931,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             case 'cursor_right':
             case 'cursor_enter':
                 if (isset($featureMap['symcon_dpad'])) {
-                    $varId = $featureMap['symcon_dpad'];
+                    $varId = (int)$featureMap['symcon_dpad'];
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 Command $cmdId uses feature symcon_dpad | varId=$varId", 0);
                     if (IPS_VariableExists($varId)) {
                         $var = IPS_GetVariable($varId);
                         $profile = $var['VariableCustomProfile'] ?: $var['VariableProfile'];
@@ -4880,6 +4940,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         if ($profile && IPS_VariableProfileExists($profile)) {
                             $profileData = IPS_GetVariableProfile($profile);
                             $currentValue = GetValue($varId);
+                            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | currentValue=" . json_encode($currentValue) . " | associations=" . json_encode($profileData['Associations'] ?? []), 0);
                             $newValue = null;
 
                             foreach ($profileData['Associations'] as $assoc) {
@@ -4899,7 +4960,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             }
 
                             if ($newValue !== null) {
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction varId=$varId value=" . json_encode($newValue), 0);
                                 RequestAction($varId, $newValue);
+                                usleep(10000);
+                                $updatedValue = @GetValue($varId);
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
                                 $attributes['state'] = strtoupper($cmdId);
                             } else {
                                 $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⏭ No suitable alternative for $cmdId found in profile", 0);
@@ -4921,7 +4986,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             case 'digit_8':
             case 'digit_9':
                 if (isset($featureMap['symcon_numpad'])) {
-                    $varId = $featureMap['symcon_numpad'];
+                    $varId = (int)$featureMap['symcon_numpad'];
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 Command $cmdId uses feature symcon_numpad | varId=$varId", 0);
                     if (IPS_VariableExists($varId)) {
                         $var = IPS_GetVariable($varId);
                         $profile = $var['VariableCustomProfile'] ?: $var['VariableProfile'];
@@ -4929,6 +4995,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         if ($profile && IPS_VariableProfileExists($profile)) {
                             $profileData = IPS_GetVariableProfile($profile);
                             $digit = str_replace('digit_', '', $cmdId);
+                            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | digit=$digit | associations=" . json_encode($profileData['Associations'] ?? []), 0);
                             $targetValue = null;
 
                             foreach ($profileData['Associations'] as $assoc) {
@@ -4939,7 +5006,11 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             }
 
                             if ($targetValue !== null) {
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction varId=$varId value=" . json_encode($targetValue), 0);
                                 RequestAction($varId, $targetValue);
+                                usleep(10000);
+                                $updatedValue = @GetValue($varId);
+                                $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
                                 $attributes['state'] = strtoupper($cmdId);
                             } else {
                                 $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⏭ No matching digit $digit found in profile", 0);
@@ -4959,7 +5030,6 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             case 'context_menu':
             case 'guide':
             case 'info':
-            case 'back':
             case 'record':
             case 'my_recordings':
             case 'live':
@@ -4973,61 +5043,129 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             case 'seek':
                 if (isset($msgData['params']['media_position']) && isset($featureMap['media_position'])) {
-                    RequestAction($featureMap['media_position'], (int)$msgData['params']['media_position']);
-                    $attributes['media_position'] = (int)$msgData['params']['media_position'];
+                    $varId = (int)$featureMap['media_position'];
+                    $targetValue = (int)$msgData['params']['media_position'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 seek | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 seek | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['media_position'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ seek ignored because media_position feature or parameter is missing", 0);
                 }
                 break;
 
             case 'volume':
                 if (isset($msgData['params']['volume']) && isset($featureMap['volume'])) {
-                    RequestAction($featureMap['volume'], (float)$msgData['params']['volume']);
-                    $attributes['volume'] = (float)$msgData['params']['volume'];
+                    $varId = (int)$featureMap['volume'];
+                    $targetValue = (float)$msgData['params']['volume'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 volume | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 volume | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['volume'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ volume ignored because volume feature or parameter is missing", 0);
                 }
                 break;
 
             case 'volume_up':
             case 'volume_down':
                 if (isset($featureMap['volume']) && IPS_VariableExists($featureMap['volume'])) {
-                    $cur = GetValue($featureMap['volume']);
+                    $varId = (int)$featureMap['volume'];
+                    $cur = GetValue($varId);
                     $delta = ($cmdId === 'volume_up') ? 5 : -5;
-                    RequestAction($featureMap['volume'], max(0, $cur + $delta));
-                    $attributes['volume'] = max(0, $cur + $delta);
+                    $targetValue = max(0, $cur + $delta);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | volume varId=$varId | current=" . json_encode($cur) . " | delta=" . json_encode($delta) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 $cmdId | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['volume'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ $cmdId ignored because volume feature is not mapped", 0);
                 }
                 break;
 
             case 'mute_toggle':
                 if (isset($featureMap['muted'])) {
-                    $val = GetValue($featureMap['muted']);
-                    RequestAction($featureMap['muted'], !$val);
-                    $attributes['muted'] = !$val;
+                    $varId = (int)$featureMap['muted'];
+                    $val = GetValue($varId);
+                    $targetValue = !$val;
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 mute_toggle | varId=$varId | current=" . json_encode($val) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 mute_toggle | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['muted'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ mute_toggle ignored because muted feature is not mapped", 0);
                 }
                 break;
 
             case 'mute':
                 if (isset($featureMap['muted'])) {
-                    RequestAction($featureMap['muted'], true);
+                    $varId = (int)$featureMap['muted'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 mute | varId=$varId | current=" . json_encode($currentValue) . " | target=true", 0);
+                    RequestAction($varId, true);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 mute | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
                     $attributes['muted'] = true;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ mute ignored because muted feature is not mapped", 0);
                 }
                 break;
 
             case 'unmute':
                 if (isset($featureMap['muted'])) {
-                    RequestAction($featureMap['muted'], false);
+                    $varId = (int)$featureMap['muted'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 unmute | varId=$varId | current=" . json_encode($currentValue) . " | target=false", 0);
+                    RequestAction($varId, false);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 unmute | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
                     $attributes['muted'] = false;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ unmute ignored because muted feature is not mapped", 0);
                 }
                 break;
 
             case 'repeat':
                 if (isset($msgData['params']['repeat']) && isset($featureMap['repeat'])) {
-                    RequestAction($featureMap['repeat'], (bool)$msgData['params']['repeat']);
-                    $attributes['repeat'] = (bool)$msgData['params']['repeat'];
+                    $varId = (int)$featureMap['repeat'];
+                    $targetValue = (bool)$msgData['params']['repeat'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 repeat | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 repeat | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['repeat'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ repeat ignored because repeat feature or parameter is missing", 0);
                 }
                 break;
 
             case 'shuffle':
                 if (isset($msgData['params']['shuffle']) && isset($featureMap['shuffle'])) {
-                    RequestAction($featureMap['shuffle'], (bool)$msgData['params']['shuffle']);
-                    $attributes['shuffle'] = (bool)$msgData['params']['shuffle'];
+                    $varId = (int)$featureMap['shuffle'];
+                    $targetValue = (bool)$msgData['params']['shuffle'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 shuffle | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 shuffle | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['shuffle'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ shuffle ignored because shuffle feature or parameter is missing", 0);
                 }
                 break;
 
@@ -5038,15 +5176,33 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
             case 'select_source':
                 if (isset($msgData['params']['source']) && isset($featureMap['source'])) {
-                    RequestAction($featureMap['source'], $msgData['params']['source']);
-                    $attributes['source'] = $msgData['params']['source'];
+                    $varId = (int)$featureMap['source'];
+                    $targetValue = $msgData['params']['source'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 select_source | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 select_source | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['source'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ select_source ignored because source feature or parameter is missing", 0);
                 }
                 break;
 
             case 'select_sound_mode':
                 if (isset($msgData['params']['mode']) && isset($featureMap['sound_mode'])) {
-                    RequestAction($featureMap['sound_mode'], $msgData['params']['mode']);
-                    $attributes['sound_mode'] = $msgData['params']['mode'];
+                    $varId = (int)$featureMap['sound_mode'];
+                    $targetValue = $msgData['params']['mode'];
+                    $currentValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 select_sound_mode | varId=$varId | current=" . json_encode($currentValue) . " | target=" . json_encode($targetValue), 0);
+                    RequestAction($varId, $targetValue);
+                    usleep(10000);
+                    $updatedValue = @GetValue($varId);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 select_sound_mode | RequestAction finished | varId=$varId | updated=" . json_encode($updatedValue), 0);
+                    $attributes['sound_mode'] = $targetValue;
+                } else {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ select_sound_mode ignored because sound_mode feature or parameter is missing", 0);
                 }
                 break;
 
@@ -5055,6 +5211,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 break;
         }
 
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🎵 MediaPlayer attributes after command $cmdId: " . json_encode($attributes), 0);
         if (!empty($attributes)) {
             $this->SendEntityChange($entityId, 'media_player', $attributes);
         }
