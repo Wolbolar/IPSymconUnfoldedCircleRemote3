@@ -111,7 +111,7 @@ class Remote3Dock extends IPSModuleStrict
 
         // Enable actions for writable variables
         $this->EnsureWritableActions($enabled);
-        $this->ApplyPresentationsForEnabled($enabled);
+        // $this->ApplyPresentationsForEnabled($enabled);
 
         // Remove legacy variables from older versions (no longer used)
         foreach (['Port1Mode', 'Port1ActiveMode', 'Port2Mode', 'Port2ActiveMode'] as $legacyIdent) {
@@ -584,15 +584,39 @@ class Remote3Dock extends IPSModuleStrict
     }
 
     /**
-     * IPS_SetVariableCustomPresentation expects a JSON string as 2nd parameter.
-     * Passing an array triggers "Cannot auto-convert value for parameter Presentation".
+     * Build and apply a custom variable presentation.
+     *
+     * Symcon expects the 2nd parameter of IPS_SetVariableCustomPresentation() to be an array.
+     * Some nested parameters (for example OPTIONS on enumerations) must themselves be JSON strings.
+     *
+     * @param int $variableId Target variable ID
+     * @param string $presentation Presentation GUID, e.g. VARIABLE_PRESENTATION_SLIDER
+     * @param array $parameters Additional presentation parameters on root level
+     * @param array $jsonKeys Parameter keys inside $parameters that must be JSON encoded
      */
-    private function SetCustomPresentation(int $variableId, array $presentation): void
+    private function SetCustomPresentation(int $variableId, string $presentation, array $parameters = [], array $jsonKeys = []): void
     {
-        IPS_SetVariableCustomPresentation(
-            $variableId,
-            json_encode($presentation, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
-        );
+        $payload = array_merge([
+            'PRESENTATION' => $presentation
+        ], $parameters);
+
+        foreach ($jsonKeys as $key) {
+            if (!array_key_exists($key, $payload)) {
+                continue;
+            }
+
+            if (is_array($payload[$key]) || is_object($payload[$key])) {
+                $json = json_encode($payload[$key], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                if ($json === false) {
+                    $this->SendDebug(__FUNCTION__, 'Failed to encode presentation sub-key: ' . $key, 0);
+                    return;
+                }
+                $payload[$key] = $json;
+            }
+        }
+
+        $this->SendDebug(__FUNCTION__, 'Applying presentation: ' . json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 0);
+        IPS_SetVariableCustomPresentation($variableId, $payload);
     }
 
     private function ApplyPresentationsForEnabled(array $enabledIdents): void
@@ -620,49 +644,43 @@ class Remote3Dock extends IPSModuleStrict
         switch ($ident) {
             case 'LEDBrightness':
             case 'EthernetLEDBrightness':
-                // Slider Parameter: siehe Symcon Objekt-Darstellung "Schieberegler"  [oai_citation:3‡symcon.de](https://www.symcon.de/de/service/dokumentation/entwicklerbereich/sdk-tools/sdk-php/darstellungen)
-                $this->SetCustomPresentation($varId, [
-                    'PRESENTATION' => VARIABLE_PRESENTATION_SLIDER,
+            // Slider parameter names according to Symcon documentation
+            $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_SLIDER, [
                     'MIN' => 0,
                     'MAX' => 100,
-                    'STEP' => 1
+                'STEP_SIZE' => 1
                 ]);
                 break;
 
             case 'Volume':
-                $this->SetCustomPresentation($varId, [
-                    'PRESENTATION' => VARIABLE_PRESENTATION_SLIDER,
+                $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_SLIDER, [
                     'MIN' => 0,
                     'MAX' => 100,
-                    'STEP' => 1
+                    'STEP_SIZE' => 1
                 ]);
                 break;
 
             case 'Ethernet':
             case 'WiFi':
-                $this->SetCustomPresentation($varId, [
-                    'PRESENTATION' => VARIABLE_PRESENTATION_SWITCH
-                ]);
+            $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_SWITCH);
                 break;
 
             case 'Port1Control':
             case 'Port2Control':
-                // Aufzählung (= Enumeration) mit Optionen, erfordert EnableAction  [oai_citation:4‡symcon.de](https://www.symcon.de/de/service/dokumentation/komponenten/objekt-darstellung/aufzaehlung)
-                $this->SetCustomPresentation($varId, [
-                    'PRESENTATION' => VARIABLE_PRESENTATION_ENUMERATION,
+            // Enumeration options must be provided JSON-encoded inside the root presentation array
+            $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_ENUMERATION, [
                     'OPTIONS' => [
                         [
-                            'VALUE' => 0,
-                            'CAPTION' => 'Automatisch'
+                            'Value' => 0,
+                            'Caption' => 'Automatisch'
                         ],
                         [
-                            'VALUE' => 1,
-                            'CAPTION' => 'Manuell'
+                            'Value' => 1,
+                            'Caption' => 'Manuell'
                         ]
-                    ],
-                    // optional: wie dargestellt wird (Row/Column/Grid) – je nach Symcon-Konstante
-                    // 'ARRANGEMENT' => VARIABLE_PRESENTATION_ENUMERATION_ARRANGEMENT_ROW,
-                ]);
+                    ]
+                // optional: additional enumeration parameters can be added here later
+            ], ['OPTIONS']);
                 break;
 
             default:
@@ -762,7 +780,7 @@ class Remote3Dock extends IPSModuleStrict
 
         // Ensure actions are enabled for writable variables that were just created
         $this->EnsureWritableActions($enabledIdents);
-        $this->ApplyPresentationsForEnabled($enabledIdents);
+        // $this->ApplyPresentationsForEnabled($enabledIdents);
 
         // Remove legacy variables from older versions (no longer used)
         foreach (['Port1Mode', 'Port1ActiveMode', 'Port2Mode', 'Port2ActiveMode'] as $legacyIdent) {

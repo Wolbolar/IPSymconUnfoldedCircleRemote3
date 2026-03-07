@@ -160,6 +160,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->RegisterAttributeString('popup_remote_suggestions', '[]');
         $this->RegisterAttributeString('popup_sensor_suggestions', '[]');
         $this->RegisterAttributeString('popup_switch_suggestions', '[]');
+        $this->RegisterAttributeString('popup_select_suggestions', '[]');
 
         // Properties for Button and Switch mapping configuration
         $this->RegisterPropertyString('button_mapping', '[]');
@@ -172,6 +173,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $this->RegisterPropertyString('remote_mapping', '[]');
         $this->RegisterPropertyString('sensor_mapping', '[]');
         $this->RegisterPropertyString('ip_whitelist', '[]');
+        $this->RegisterPropertyString('select_mapping', '[]');
 
         // --- Expert Debug / Debug Filtering ---
         $this->RegisterPropertyBoolean('expert_debug', false);
@@ -581,6 +583,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
         }
 
+        // select
+        $selectMapping = json_decode($this->ReadPropertyString('select_mapping'), true);
+        if (is_array($selectMapping)) {
+            foreach ($selectMapping as $e) {
+                $add($e['var_id'] ?? 0);
+            }
+        }
+
         return array_map('intval', array_keys($ids));
     }
 
@@ -732,7 +742,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'light' => 'light_mapping',
             'media' => 'media_player_mapping',
             'remote' => 'remote_mapping',
-            'sensor' => 'sensor_mapping'
+            'sensor' => 'sensor_mapping',
+            'select' => 'select_mapping'
         ];
 
         foreach ($types as $type => $property) {
@@ -887,6 +898,65 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             $attributes['unit'] = $result['unit'];
                             $attributes['state'] = 'ON';
                             $this->SendEntityChange('sensor_' . (int)$varId, 'sensor', $attributes);
+                        }
+                        break;
+
+                    case 'select':
+                        $varId = $entry['var_id'] ?? null;
+                        if (is_numeric($varId) && @IPS_VariableExists((int)$varId)) {
+                            $varId = (int)$varId;
+                            $currentValue = @GetValue($varId);
+
+                            $varInfo = @IPS_GetVariable($varId);
+                            $profileName = '';
+                            if (is_array($varInfo)) {
+                                $profileName = trim((string)($varInfo['VariableCustomProfile'] ?? ''));
+                                if ($profileName === '') {
+                                    $profileName = trim((string)($varInfo['VariableProfile'] ?? ''));
+                                }
+                            }
+
+                            $options = [];
+                            $currentOption = '';
+
+                            if ($profileName !== '' && @IPS_VariableProfileExists($profileName)) {
+                                $profile = @IPS_GetVariableProfile($profileName);
+                                $associations = $profile['Associations'] ?? [];
+
+                                if (is_array($associations)) {
+                                    foreach ($associations as $assoc) {
+                                        if (!is_array($assoc)) {
+                                            continue;
+                                        }
+
+                                        $label = trim((string)($assoc['Name'] ?? ''));
+                                        if ($label === '') {
+                                            $label = (string)($assoc['Value'] ?? '');
+                                        }
+
+                                        if ($label === '') {
+                                            continue;
+                                        }
+
+                                        $options[] = $label;
+
+                                        if ((string)($assoc['Value'] ?? '') === (string)$currentValue) {
+                                            $currentOption = $label;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if ($currentOption === '') {
+                                $currentOption = (string)$currentValue;
+                            }
+
+                            $attributes['options'] = array_values(array_unique($options));
+                            $attributes['current_option'] = $currentOption;
+                            $attributes['state'] = 'ON';
+
+                            $entityId = 'select_' . $entry['instance_id'] . '_' . $varId;
+                            $this->SendEntityChange($entityId, 'select', $attributes);
                         }
                         break;
 
@@ -1978,7 +2048,8 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             'sensor' => ['property' => 'sensor_mapping', 'feature' => []],
             'climate' => ['property' => 'climate_mapping', 'feature' => []],
             'light' => ['property' => 'light_mapping', 'feature' => []],
-            'media_player' => ['property' => 'media_player_mapping', 'feature' => []]
+            'media_player' => ['property' => 'media_player_mapping', 'feature' => []],
+            'select' => ['property' => 'select_mapping', 'feature' => []]
         ];
 
         foreach ($mappings as $type => $info) {
@@ -2036,6 +2107,25 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             continue 2;
                         }
                         $entityId = 'sensor_' . (int)$entry['var_id'];
+                        break;
+
+                    case 'select':
+                        // Select entities are variable-based, because one instance can expose multiple selectable variables.
+                        // Therefore use a composite entity id based on instance_id + var_id.
+                        if (!isset($entry['var_id']) || !is_numeric($entry['var_id'])) {
+                            continue 2;
+                        }
+                        if (!isset($entry['instance_id']) || !is_numeric($entry['instance_id'])) {
+                            continue 2;
+                        }
+                        $entityId = 'select_' . (int)$entry['instance_id'] . '_' . (int)$entry['var_id'];
+                        $features = [
+                            'select_option',
+                            'select_next',
+                            'select_previous',
+                            'select_first',
+                            'select_last'
+                        ];
                         break;
 
                     default:
@@ -2327,6 +2417,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
             }
         }
 
+
         // Media Player
         $mediaMapping = json_decode($this->ReadPropertyString('media_player_mapping'), true);
         if (is_array($mediaMapping)) {
@@ -2352,6 +2443,83 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     'entity_id' => $entityId,
                     'entity_type' => 'media_player',
                     'attributes' => $attributes
+                ];
+            }
+        }
+
+        // Select
+        $selectMapping = json_decode($this->ReadPropertyString('select_mapping'), true);
+        if (is_array($selectMapping)) {
+            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_IO, "🔍 Verarbeite Select-Mapping...", 0);
+
+            foreach ($selectMapping as $entry) {
+                if (!isset($entry['instance_id']) || !is_numeric($entry['instance_id'])) {
+                    continue;
+                }
+                if (!isset($entry['var_id']) || !is_numeric($entry['var_id'])) {
+                    continue;
+                }
+
+                $instanceId = (int)$entry['instance_id'];
+                $varId = (int)$entry['var_id'];
+
+                if ($instanceId <= 0 || $varId <= 0 || !@IPS_VariableExists($varId)) {
+                    continue;
+                }
+
+                $currentValue = @GetValue($varId);
+                $varInfo = @IPS_GetVariable($varId);
+                if (!is_array($varInfo)) {
+                    continue;
+                }
+
+                $profileName = trim((string)($varInfo['VariableCustomProfile'] ?? ''));
+                if ($profileName === '') {
+                    $profileName = trim((string)($varInfo['VariableProfile'] ?? ''));
+                }
+
+                $options = [];
+                $currentOption = '';
+
+                if ($profileName !== '' && @IPS_VariableProfileExists($profileName)) {
+                    $profile = @IPS_GetVariableProfile($profileName);
+                    $associations = $profile['Associations'] ?? [];
+
+                    if (is_array($associations)) {
+                        foreach ($associations as $assoc) {
+                            if (!is_array($assoc)) {
+                                continue;
+                            }
+
+                            $label = trim((string)($assoc['Name'] ?? ''));
+                            if ($label === '') {
+                                $label = (string)($assoc['Value'] ?? '');
+                            }
+                            if ($label === '') {
+                                continue;
+                            }
+
+                            $options[] = $label;
+
+                            if ((string)($assoc['Value'] ?? '') === (string)$currentValue) {
+                                $currentOption = $label;
+                            }
+                        }
+                    }
+                }
+
+                if ($currentOption === '') {
+                    $currentOption = (string)$currentValue;
+                }
+
+                $entities[] = [
+                    'entity_id' => 'select_' . $instanceId . '_' . $varId,
+                    'entity_type' => 'select',
+                    'attributes' => [
+                        'options' => array_values(array_unique($options)),
+                        'current_option' => $currentOption,
+                        'state' => 'ON'
+                    ]
                 ];
             }
         }
@@ -3562,10 +3730,359 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                 $this->HandleSwitchCommand($msgData, $clientIP, $clientPort, $reqId);
                 break;
 
+            case 'select':
+                $this->HandleSelectCommand($msgData, $clientIP, $clientPort, $reqId);
+                break;
+
             default:
                 $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Unbekannter entity_type: $entityType", 0);
                 break;
         }
+    }
+
+    private function HandleSelectCommand(array $msgData, $clientIP, $clientPort, $reqId): void
+    {
+        $entityId = (string)($msgData['entity_id'] ?? '');
+        $cmdId = (string)($msgData['cmd_id'] ?? '');
+        $params = $msgData['params'] ?? [];
+
+        $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔽 Select-Command: $cmdId für $entityId", 0);
+
+        if (!preg_match('/^select_(\d+)_(\d+)$/', $entityId, $match)) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Konnte instance_id / var_id aus Select-Entity-ID nicht extrahieren: $entityId", 0);
+            return;
+        }
+
+        $instanceId = (int)$match[1];
+        $varId = (int)$match[2];
+        $lockName = 'UCR_' . $instanceId . '_' . $varId;
+
+        if (!IPS_SemaphoreEnter($lockName, 5000)) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Semaphore '$lockName' konnte nicht gesetzt werden (Timeout)", 0);
+            return;
+        }
+
+        try {
+            $mapping = json_decode((string)$this->ReadPropertyString('select_mapping'), true);
+            if (!is_array($mapping)) {
+                $mapping = [];
+            }
+
+            $found = null;
+            foreach ($mapping as $entry) {
+                if (!is_array($entry)) {
+                    continue;
+                }
+                if ((int)($entry['instance_id'] ?? 0) === $instanceId && (int)($entry['var_id'] ?? 0) === $varId) {
+                    $found = $entry;
+                    break;
+                }
+            }
+
+            if ($found === null) {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Kein passender Select-Eintrag gefunden für Entity-ID $entityId", 0);
+                return;
+            }
+
+            if (!@IPS_VariableExists($varId)) {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Select-Variable existiert nicht: var_id=$varId", 0);
+                return;
+            }
+
+            $targetValue = null;
+
+            switch ($cmdId) {
+                case 'select_option':
+                    $option = $params['option'] ?? ($params['selected_option'] ?? null);
+                    if (!is_string($option) || trim($option) === '') {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ select_option ohne gültigen Optionsnamen empfangen", 0);
+                        return;
+                    }
+                    $targetValue = $this->GetSelectProfileValueByLabel($varId, trim($option));
+                    if ($targetValue === null) {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Keine passende Select-Option im Profil gefunden: '" . trim($option) . "'", 0);
+                        return;
+                    }
+                    break;
+
+                case 'select_next':
+                    $targetValue = $this->GetRelativeSelectProfileValue($varId, +1);
+                    break;
+
+                case 'select_previous':
+                    $targetValue = $this->GetRelativeSelectProfileValue($varId, -1);
+                    break;
+
+                case 'select_first':
+                    $targetValue = $this->GetBoundarySelectProfileValue($varId, true);
+                    break;
+
+                case 'select_last':
+                    $targetValue = $this->GetBoundarySelectProfileValue($varId, false);
+                    break;
+
+                default:
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Unbekannter Select-Command: $cmdId", 0);
+                    return;
+            }
+
+            if ($targetValue === null) {
+                $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Kein Zielwert für Select-Command ermittelt: $cmdId", 0);
+                return;
+            }
+
+            $currentValue = @GetValue($varId);
+            $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔽 RequestAction für Select var_id=$varId | current=" . json_encode($currentValue) . " → target=" . json_encode($targetValue), 0);
+            RequestAction($varId, $targetValue);
+            usleep(10000);
+
+            $updatedValue = @GetValue($varId);
+            $updatedLabel = $this->GetProfileValueLabelForSelect($varId, $updatedValue);
+            if ($updatedLabel === '') {
+                $updatedLabel = (string)$updatedValue;
+            }
+
+            $options = $this->GetSelectProfileLabels($varId);
+
+            $attributes = [
+                'options' => $options,
+                'current_option' => $updatedLabel,
+                'state' => 'ON'
+            ];
+
+            $this->SendEntityChange($entityId, 'select', $attributes);
+            $this->SendSuccessResponse((int)$reqId, $clientIP, (int)$clientPort);
+        } finally {
+            IPS_SemaphoreLeave($lockName);
+        }
+    }
+
+    private function GetSelectProfileLabels(int $varId): array
+    {
+        if (!@IPS_VariableExists($varId)) {
+            return [];
+        }
+
+        $var = @IPS_GetVariable($varId);
+        if (!is_array($var)) {
+            return [];
+        }
+
+        $profile = trim((string)($var['VariableCustomProfile'] ?? ''));
+        if ($profile === '') {
+            $profile = trim((string)($var['VariableProfile'] ?? ''));
+        }
+
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            return [];
+        }
+
+        $profileData = @IPS_GetVariableProfile($profile);
+        if (!is_array($profileData)) {
+            return [];
+        }
+
+        $labels = [];
+        foreach (($profileData['Associations'] ?? []) as $assoc) {
+            if (!is_array($assoc)) {
+                continue;
+            }
+            $label = trim((string)($assoc['Name'] ?? ''));
+            if ($label === '') {
+                $label = (string)($assoc['Value'] ?? '');
+            }
+            if ($label === '') {
+                continue;
+            }
+            $labels[] = $label;
+        }
+
+        return array_values(array_unique($labels));
+    }
+
+    private function GetProfileValueLabelForSelect(int $varId, $value): string
+    {
+        if (!@IPS_VariableExists($varId)) {
+            return '';
+        }
+
+        $var = @IPS_GetVariable($varId);
+        if (!is_array($var)) {
+            return '';
+        }
+
+        $profile = trim((string)($var['VariableCustomProfile'] ?? ''));
+        if ($profile === '') {
+            $profile = trim((string)($var['VariableProfile'] ?? ''));
+        }
+
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            return '';
+        }
+
+        $profileData = @IPS_GetVariableProfile($profile);
+        if (!is_array($profileData)) {
+            return '';
+        }
+
+        foreach (($profileData['Associations'] ?? []) as $assoc) {
+            if (!is_array($assoc)) {
+                continue;
+            }
+            if ((string)($assoc['Value'] ?? '') === (string)$value) {
+                $label = trim((string)($assoc['Name'] ?? ''));
+                return $label !== '' ? $label : (string)($assoc['Value'] ?? '');
+            }
+        }
+
+        return '';
+    }
+
+    private function GetSelectProfileValueByLabel(int $varId, string $searchLabel)
+    {
+        if (!@IPS_VariableExists($varId)) {
+            return null;
+        }
+
+        $var = @IPS_GetVariable($varId);
+        if (!is_array($var)) {
+            return null;
+        }
+
+        $profile = trim((string)($var['VariableCustomProfile'] ?? ''));
+        if ($profile === '') {
+            $profile = trim((string)($var['VariableProfile'] ?? ''));
+        }
+
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            return null;
+        }
+
+        $profileData = @IPS_GetVariableProfile($profile);
+        if (!is_array($profileData)) {
+            return null;
+        }
+
+        $searchLabelNorm = mb_strtolower(trim($searchLabel));
+
+        foreach (($profileData['Associations'] ?? []) as $assoc) {
+            if (!is_array($assoc)) {
+                continue;
+            }
+            $label = trim((string)($assoc['Name'] ?? ''));
+            if ($label === '') {
+                $label = (string)($assoc['Value'] ?? '');
+            }
+            if ($label === '') {
+                continue;
+            }
+            if (mb_strtolower($label) === $searchLabelNorm) {
+                return $assoc['Value'] ?? null;
+            }
+        }
+
+        return null;
+    }
+
+    private function GetRelativeSelectProfileValue(int $varId, int $direction)
+    {
+        if (!@IPS_VariableExists($varId)) {
+            return null;
+        }
+
+        $var = @IPS_GetVariable($varId);
+        if (!is_array($var)) {
+            return null;
+        }
+
+        $profile = trim((string)($var['VariableCustomProfile'] ?? ''));
+        if ($profile === '') {
+            $profile = trim((string)($var['VariableProfile'] ?? ''));
+        }
+
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            return null;
+        }
+
+        $profileData = @IPS_GetVariableProfile($profile);
+        if (!is_array($profileData)) {
+            return null;
+        }
+
+        $associations = $profileData['Associations'] ?? [];
+        if (!is_array($associations) || empty($associations)) {
+            return null;
+        }
+
+        usort($associations, static function ($a, $b) {
+            return ((float)($a['Value'] ?? 0)) <=> ((float)($b['Value'] ?? 0));
+        });
+
+        $currentValue = @GetValue($varId);
+        $currentIndex = null;
+
+        foreach ($associations as $idx => $assoc) {
+            if ((string)($assoc['Value'] ?? '') === (string)$currentValue) {
+                $currentIndex = $idx;
+                break;
+            }
+        }
+
+        if ($currentIndex === null) {
+            return null;
+        }
+
+        $targetIndex = $currentIndex + $direction;
+        if ($targetIndex < 0) {
+            $targetIndex = 0;
+        }
+        if ($targetIndex >= count($associations)) {
+            $targetIndex = count($associations) - 1;
+        }
+
+        return $associations[$targetIndex]['Value'] ?? null;
+    }
+
+    private function GetBoundarySelectProfileValue(int $varId, bool $first)
+    {
+        if (!@IPS_VariableExists($varId)) {
+            return null;
+        }
+
+        $var = @IPS_GetVariable($varId);
+        if (!is_array($var)) {
+            return null;
+        }
+
+        $profile = trim((string)($var['VariableCustomProfile'] ?? ''));
+        if ($profile === '') {
+            $profile = trim((string)($var['VariableProfile'] ?? ''));
+        }
+
+        if ($profile === '' || !@IPS_VariableProfileExists($profile)) {
+            return null;
+        }
+
+        $profileData = @IPS_GetVariableProfile($profile);
+        if (!is_array($profileData)) {
+            return null;
+        }
+
+        $associations = $profileData['Associations'] ?? [];
+        if (!is_array($associations) || empty($associations)) {
+            return null;
+        }
+
+        usort($associations, static function ($a, $b) {
+            return ((float)($a['Value'] ?? 0)) <=> ((float)($b['Value'] ?? 0));
+        });
+
+        $assoc = $first ? reset($associations) : end($associations);
+        if (!is_array($assoc)) {
+            return null;
+        }
+
+        return $assoc['Value'] ?? null;
     }
 
     private function HandleButtonCommand(array $msgData, $clientIP, $clientPort, $reqId): void
@@ -6503,6 +7020,12 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         $switchRows = $this->ApplyPopupSelectionState('popup_switch_suggestions', 'instance_id', $switchRows);
         $this->UpdateFormField('popup_switch_suggestions', 'values', json_encode($switchRows, JSON_UNESCAPED_SLASHES));
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY, '✅ Switch suggestions loaded: ' . count($switchRows), 0);
+
+        // Step 9: Selects (Variables)
+        $selectRows = $this->BuildSelectSuggestions();
+        $selectRows = $this->ApplyPopupSelectionState('popup_select_suggestions', 'var_id', $selectRows);
+        $this->UpdateFormField('popup_select_suggestions', 'values', json_encode($selectRows, JSON_UNESCAPED_SLASHES));
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY, '✅ Select suggestions loaded: ' . count($selectRows), 0);
     }
 
     /**
@@ -7229,6 +7752,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         return $rows;
     }
 
+
     /**
      * Build suggestions list for "Switch" devices.
      * Uses DeviceRegistry definitions (module GUID) to find matching instances.
@@ -7322,6 +7846,132 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         usort($rows, function ($a, $b) {
             return strcmp((string)($a['label'] ?? ''), (string)($b['label'] ?? ''));
         });
+
+        return $rows;
+    }
+
+    /**
+     * Build suggestions list for "Select" devices.
+     * A Select in Symcon is typically represented by a variable with a profile
+     * that contains associations (discrete selectable options).
+     *
+     * We therefore scan all variables and offer those that:
+     * - have a valid variable profile (custom or default)
+     * - the profile contains at least 2 associations
+     * - are not simple binary on/off variables
+     *
+     * @return array[] Rows for the popup list.
+     */
+    private function BuildSelectSuggestions(): array
+    {
+        $rows = [];
+        $seenVarIds = [];
+
+        $variableIds = @IPS_GetVariableList();
+        if (!is_array($variableIds)) {
+            $variableIds = [];
+        }
+
+        foreach ($variableIds as $varId) {
+            if (!is_int($varId) || !@IPS_VariableExists($varId)) {
+                continue;
+            }
+
+            $var = @IPS_GetVariable($varId);
+            if (!is_array($var)) {
+                continue;
+            }
+
+            $profileName = trim((string)($var['VariableCustomProfile'] ?? ''));
+            if ($profileName === '') {
+                $profileName = trim((string)($var['VariableProfile'] ?? ''));
+            }
+            if ($profileName === '' || !@IPS_VariableProfileExists($profileName)) {
+                continue;
+            }
+
+            try {
+                $profile = @IPS_GetVariableProfile($profileName);
+            } catch (Throwable $e) {
+                $profile = null;
+            }
+
+            if (!is_array($profile)) {
+                continue;
+            }
+
+            $associations = $profile['Associations'] ?? [];
+            if (!is_array($associations) || count($associations) < 2) {
+                continue;
+            }
+
+            // Exclude simple binary variables (typical switch profiles with 2 states 0/1)
+            $isBinary = false;
+            if (count($associations) === 2) {
+                $values = array_values(array_map(static function ($a) {
+                    return (int)($a['Value'] ?? -999999);
+                }, $associations));
+                sort($values);
+                if ($values === [0, 1]) {
+                    $isBinary = true;
+                }
+            }
+            if ($isBinary) {
+                continue;
+            }
+
+            $parentId = (int)@IPS_GetParent($varId);
+            if ($parentId <= 0) {
+                continue;
+            }
+
+            $instanceId = $parentId;
+            if (!@IPS_InstanceExists($instanceId)) {
+                $instanceId = (int)@IPS_GetParent($parentId);
+            }
+            if ($instanceId <= 0 || !@IPS_InstanceExists($instanceId)) {
+                continue;
+            }
+
+            if (isset($seenVarIds[$varId])) {
+                continue;
+            }
+
+            $instName = (string)@IPS_GetName($instanceId);
+            $varName = (string)@IPS_GetName($varId);
+            $path = $this->GetObjectPath($varId);
+
+            $displayName = $varName !== '' ? $varName : ('Select ' . $varId);
+            $labelBase = ($path !== '' ? ($path . ' → ') : '') . $displayName;
+            $label = '[Select] ' . $labelBase;
+
+            $name = $instName;
+            if ($name !== '' && $varName !== '') {
+                $name .= ' – ' . $varName;
+            } elseif ($varName !== '') {
+                $name = $varName;
+            } elseif ($name === '') {
+                $name = 'Select';
+            }
+
+            $rows[] = [
+                'register' => false,
+                'label' => $label,
+                'name' => $name,
+                'instance_id' => (int)$instanceId,
+                'var_id' => (int)$varId,
+                'profile' => $profileName
+            ];
+
+            $seenVarIds[$varId] = true;
+        }
+
+        usort($rows, function ($a, $b) {
+            return strcmp((string)($a['label'] ?? ''), (string)($b['label'] ?? ''));
+        });
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY,
+            '✅ Built select suggestions: ' . count($rows), 0);
 
         return $rows;
     }
@@ -8031,6 +8681,100 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
                 $this->UpdateFormField('sensor_mapping', 'values', json_encode($existingSensors, JSON_UNESCAPED_SLASHES));
             }
+
+            // -------------------------
+            // Step 6: Select
+            // -------------------------
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY,
+                '➕ Applying suggested devices (step 6: select)', 0);
+
+            $selectSelected = $this->ReadSelectedFromPopupCache('popup_select_suggestions', 'var_id');
+            $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY,
+                '✅ Selected select rows: ' . count($selectSelected), 0);
+
+            if (!$selectSelected) {
+                // continue with next step
+            } else {
+                // existing Select mapping
+                $existingSelects = json_decode((string)$this->ReadPropertyString('select_mapping'), true);
+                if (!is_array($existingSelects)) {
+                    $existingSelects = [];
+                }
+
+                // Uniqueness: allow multiple rows per instance only if var_id differs
+                $existingKeys = [];
+                foreach ($existingSelects as $e) {
+                    if (!is_array($e)) {
+                        continue;
+                    }
+                    $iid0 = (int)($e['instance_id'] ?? 0);
+                    $vid0 = (int)($e['var_id'] ?? 0);
+                    if ($iid0 > 0 && $vid0 > 0) {
+                        $existingKeys[$iid0 . ':' . $vid0] = true;
+                    }
+                }
+
+                $addedSelects = 0;
+
+                foreach ($selectSelected as $s) {
+                    $iid = (int)($s['instance_id'] ?? 0);
+                    $varId = (int)($s['var_id'] ?? 0);
+
+                    if ($varId <= 0 || !@IPS_VariableExists($varId)) {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_DISCOVERY,
+                            '⚠️ Skipping select row: invalid/missing var_id', 0);
+                        continue;
+                    }
+
+                    // Popup cache may only store {register,var_id}. Derive instance_id from variable parent if missing.
+                    if ($iid <= 0) {
+                        $iid = (int)@IPS_GetParent($varId);
+                    }
+
+                    if ($iid <= 0 || !@IPS_InstanceExists($iid)) {
+                        $parentId = (int)@IPS_GetParent($varId);
+                        if ($parentId > 0) {
+                            $iid = (int)@IPS_GetParent($parentId);
+                        }
+                    }
+
+                    if ($iid <= 0 || !@IPS_InstanceExists($iid)) {
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_DISCOVERY,
+                            "⚠️ Skipping select varId=$varId: could not resolve valid instance_id (instance=$iid)", 0);
+                        continue;
+                    }
+
+                    $key = $iid . ':' . (int)$varId;
+                    if (isset($existingKeys[$key])) {
+                        continue;
+                    }
+
+                    $instName = trim((string)@IPS_GetName($iid));
+                    $varName = trim((string)@IPS_GetName($varId));
+                    $shortName = $instName;
+                    if ($shortName !== '' && $varName !== '') {
+                        $shortName .= ' – ' . $varName;
+                    } elseif ($varName !== '') {
+                        $shortName = $varName;
+                    } elseif ($shortName === '') {
+                        $shortName = 'Select';
+                    }
+
+                    $existingSelects[] = [
+                        'name' => $shortName,
+                        'instance_id' => $iid,
+                        'var_id' => (int)$varId
+                    ];
+
+                    $existingKeys[$key] = true;
+                    $addedSelects++;
+                }
+
+                $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY,
+                    '➕ Selects added to mapping: ' . $addedSelects, 0);
+
+                $this->UpdateFormField('select_mapping', 'values', json_encode($existingSelects, JSON_UNESCAPED_SLASHES));
+            }
         } catch (Throwable $e) {
             $this->Debug(__FUNCTION__, self::LV_ERROR, self::TOPIC_DISCOVERY,
                 '💥 ApplySuggestedDevices crashed: ' . $e->getMessage(), 0);
@@ -8489,6 +9233,22 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'delete' => false,
                             'rowCount' => 8,
                             'onEdit' => 'UCR_StorePopupList($id, "popup_switch_suggestions", (string)$popup_switch_suggestions["register"], "instance_id", (string)$popup_switch_suggestions["instance_id"]);'
+                        ],
+                        [
+                            'type' => 'List',
+                            'name' => 'popup_select_suggestions',
+                            'caption' => '🔽 Select',
+                            'columns' => [
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
+                                ['caption' => 'Var ID', 'name' => 'var_id', 'width' => '10px', 'visible' => false, 'save' => true],
+                            ],
+                            'add' => false,
+                            'delete' => false,
+                            'rowCount' => 8,
+                            'onEdit' => 'UCR_StorePopupSensorSelection($id, (string)$popup_select_suggestions["register"], (string)$popup_select_suggestions["instance_id"], (string)$popup_select_suggestions["var_id"]);'
                         ]
                     ],
                     'buttons' => [
@@ -8935,6 +9695,52 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                                     ]
                                 ],
                                 'add' => []
+                            ]
+                        ]
+                    ]
+                ]
+            ],
+            [
+                'type' => 'ExpansionPanel',
+                'caption' => '🔽 Select Assignment',
+                'items' => [
+                    [
+                        'type' => 'List',
+                        'name' => 'select_mapping',
+                        'caption' => 'Select Mapping',
+                        'add' => true,
+                        'delete' => true,
+                        'rowCount' => 5,
+                        'columns' => [
+                            [
+                                'caption' => 'Name',
+                                'name' => 'name',
+                                'width' => '300px',
+                                'edit' => [
+                                    'type' => 'ValidationTextBox'
+                                ],
+                                'add' => 'New Select',
+                                'save' => true
+                            ],
+                            [
+                                'caption' => 'Instance ID',
+                                'name' => 'instance_id',
+                                'width' => '400px',
+                                'add' => 0,
+                                'edit' => [
+                                    'type' => 'SelectInstance'
+                                ],
+                                'save' => true
+                            ],
+                            [
+                                'caption' => 'Variable',
+                                'name' => 'var_id',
+                                'width' => 'auto',
+                                'add' => 0,
+                                'edit' => [
+                                    'type' => 'SelectVariable'
+                                ],
+                                'save' => true
                             ]
                         ]
                     ]
