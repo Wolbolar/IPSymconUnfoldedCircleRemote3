@@ -1,24 +1,11 @@
 <?php
-
-
 declare(strict_types=1);
-// ---- Symcon variable presentation constants (guarded) ----
-// Some IDE stubs / environments may not provide these constants at parse time.
-// IPS_SetVariableCustomPresentation expects GUID strings for PRESENTATION.
-if (!defined('VARIABLE_PRESENTATION_SLIDER')) {
-    define('VARIABLE_PRESENTATION_SLIDER', '{6B9CAEEC-5958-C223-30F7-BD36569FC57A}');
-}
-if (!defined('VARIABLE_PRESENTATION_SWITCH')) {
-    define('VARIABLE_PRESENTATION_SWITCH', '{60AE6B26-B3E2-BDB1-A3A1-BE232940664B}');
-}
-if (!defined('VARIABLE_PRESENTATION_ENUMERATION')) {
-    define('VARIABLE_PRESENTATION_ENUMERATION', '{52D9E126-D7D2-2CBB-5E62-4CF7BA7C5D82}');
-}
 
-// ---------------------------------------------------------
+require_once __DIR__ . '/../libs/PresentationHelperTrait.php';
 
 class Remote3Dock extends IPSModuleStrict
 {
+    use PresentationHelperTrait;
     public function GetCompatibleParents(): string
     {
         // Require the WebSocket Client as parent
@@ -106,12 +93,12 @@ class Remote3Dock extends IPSModuleStrict
         foreach ($avail as $ident => $meta) {
             [$caption, $type, $profile, $pos] = $meta;
             $keep = isset($enabled[$ident]);
-            $this->MaintainVariable($ident, (string)$caption, (int)$type, (string)$profile, (int)$pos, $keep);
+            $presentation = $this->GetPresentationForIdent($ident, (string)$profile);
+            $this->MaintainVariable($ident, (string)$caption, (int)$type, $presentation, (int)$pos, $keep);
         }
 
         // Enable actions for writable variables
         $this->EnsureWritableActions($enabled);
-        // $this->ApplyPresentationsForEnabled($enabled);
 
         // Remove legacy variables from older versions (no longer used)
         foreach (['Port1Mode', 'Port1ActiveMode', 'Port2Mode', 'Port2ActiveMode'] as $legacyIdent) {
@@ -583,109 +570,64 @@ class Remote3Dock extends IPSModuleStrict
         return null;
     }
 
+
     /**
-     * Build and apply a custom variable presentation.
+     * Resolve the presentation/profile that should be used when the variable is registered.
+     * Returns either a legacy profile string or a presentation array for Symcon >= 8.
      *
-     * Symcon expects the 2nd parameter of IPS_SetVariableCustomPresentation() to be an array.
-     * Some nested parameters (for example OPTIONS on enumerations) must themselves be JSON strings.
+     * @param string $ident
+     * @param string $legacyProfile
      *
-     * @param int $variableId Target variable ID
-     * @param string $presentation Presentation GUID, e.g. VARIABLE_PRESENTATION_SLIDER
-     * @param array $parameters Additional presentation parameters on root level
-     * @param array $jsonKeys Parameter keys inside $parameters that must be JSON encoded
+     * @return array|string
      */
-    private function SetCustomPresentation(int $variableId, string $presentation, array $parameters = [], array $jsonKeys = []): void
+    private function GetPresentationForIdent(string $ident, string $legacyProfile = ''): array|string
     {
-        $payload = array_merge([
-            'PRESENTATION' => $presentation
-        ], $parameters);
-
-        foreach ($jsonKeys as $key) {
-            if (!array_key_exists($key, $payload)) {
-                continue;
-            }
-
-            if (is_array($payload[$key]) || is_object($payload[$key])) {
-                $json = json_encode($payload[$key], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-                if ($json === false) {
-                    $this->SendDebug(__FUNCTION__, 'Failed to encode presentation sub-key: ' . $key, 0);
-                    return;
-                }
-                $payload[$key] = $json;
-            }
-        }
-
-        $this->SendDebug(__FUNCTION__, 'Applying presentation: ' . json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 0);
-        IPS_SetVariableCustomPresentation($variableId, $payload);
-    }
-
-    private function ApplyPresentationsForEnabled(array $enabledIdents): void
-    {
-        // nur für Variablen, die existieren (enabled) und wo UI relevant ist
-        foreach (array_keys($enabledIdents) as $ident) {
-            $this->ApplyPresentationForIdent($ident);
-        }
-    }
-
-    private function ApplyPresentationForIdent(string $ident): void
-    {
-        // Variable muss existieren
-        try {
-            $varId = $this->GetIDForIdent($ident);
-        } catch (Throwable $e) {
-            return;
-        }
-        if ($varId <= 0) {
-            return;
-        }
-
-        // Für viele Read-Only Strings brauchst du nichts setzen.
-        // Wir verbessern hier gezielt die "unschönen" Controls aus deinem WebFront Screenshot.
         switch ($ident) {
             case 'LEDBrightness':
             case 'EthernetLEDBrightness':
-            // Slider parameter names according to Symcon documentation
-            $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_SLIDER, [
-                    'MIN' => 0,
-                    'MAX' => 100,
-                'STEP_SIZE' => 1
+            return $this->BuildSliderPresentation([
+                self::PARAM_MIN => 0,
+                self::PARAM_MAX => 100,
+                self::PARAM_STEP_SIZE => 1,
+                self::PARAM_USAGE_TYPE_SLIDER => self::SLIDER_USAGE_INTENSITY,
+                self::PARAM_SUFFIX => ' %',
+                self::PARAM_PERCENTAGE => true,
+                self::PARAM_ICON => 'Bulb'
                 ]);
-                break;
 
             case 'Volume':
-                $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_SLIDER, [
-                    'MIN' => 0,
-                    'MAX' => 100,
-                    'STEP_SIZE' => 1
+                return $this->BuildSliderPresentation([
+                    self::PARAM_MIN => 0,
+                    self::PARAM_MAX => 100,
+                    self::PARAM_STEP_SIZE => 1,
+                    self::PARAM_USAGE_TYPE_SLIDER => self::SLIDER_USAGE_VOLUME,
+                    self::PARAM_SUFFIX => ' %',
+                    self::PARAM_PERCENTAGE => true,
+                    self::PARAM_ICON => 'Speaker'
                 ]);
-                break;
 
             case 'Ethernet':
             case 'WiFi':
-            $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_SWITCH);
-                break;
+            return $this->BuildValueDisplayPresentation([
+                self::PARAM_USAGE_TYPE_VALUE_DISPLAY => self::VALUE_DISPLAY_USAGE_NONE,
+                self::PARAM_PERCENTAGE_VALUE_DISPLAY => false,
+                self::PARAM_MIN_VALUE_DISPLAY => 0,
+                self::PARAM_MAX_VALUE_DISPLAY => 1,
+                self::PARAM_DIGITS_VALUE_DISPLAY => 0
+            ]);
 
             case 'Port1Control':
             case 'Port2Control':
-            // Enumeration options must be provided JSON-encoded inside the root presentation array
-            $this->SetCustomPresentation($varId, VARIABLE_PRESENTATION_ENUMERATION, [
-                    'OPTIONS' => [
-                        [
-                            'Value' => 0,
-                            'Caption' => 'Automatisch'
-                        ],
-                        [
-                            'Value' => 1,
-                            'Caption' => 'Manuell'
-                        ]
-                    ]
-                // optional: additional enumeration parameters can be added here later
-            ], ['OPTIONS']);
-                break;
+            return $this->BuildEnumerationPresentation([
+                $this->BuildEnumerationOption(0, 'Automatisch'),
+                $this->BuildEnumerationOption(1, 'Manuell')
+            ], [
+                self::PARAM_LAYOUT => self::ENUM_LAYOUT_ROW,
+                self::PARAM_DISPLAY => self::ENUM_DISPLAY_CAPTION
+            ]);
 
             default:
-                // nichts tun
-                break;
+                return $legacyProfile;
         }
     }
 
@@ -775,7 +717,8 @@ class Remote3Dock extends IPSModuleStrict
         foreach ($avail as $vident => $meta) {
             [$caption, $type, $profile, $pos] = $meta;
             $keep = isset($enabledIdents[$vident]);
-            $this->MaintainVariable($vident, (string)$caption, (int)$type, (string)$profile, (int)$pos, $keep);
+            $presentation = $this->GetPresentationForIdent($vident, (string)$profile);
+            $this->MaintainVariable($vident, (string)$caption, (int)$type, $presentation, (int)$pos, $keep);
         }
 
         // Ensure actions are enabled for writable variables that were just created
