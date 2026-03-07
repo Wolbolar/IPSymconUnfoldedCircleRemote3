@@ -8099,6 +8099,59 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         );
     }
 
+    public function StorePopupSelectSelection(string $register, string $instanceId, string $varId): void
+    {
+        $reg = in_array(strtolower(trim($register)), ['1', 'true', 'yes', 'on'], true);
+        $iid = (int)trim($instanceId);
+        $vid = (int)trim($varId);
+
+        if ($vid <= 0) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_DISCOVERY,
+                "⚠️ StorePopupSelectSelection: invalid varId='$varId'", 0);
+            return;
+        }
+
+        // Read current attribute content (JSON array)
+        $listName = 'popup_select_suggestions';
+        $raw = trim((string)$this->ReadAttributeString($listName));
+        $rows = [];
+        if ($raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (is_array($decoded)) {
+                $rows = $decoded;
+            }
+        }
+
+        // Update/insert row by var_id
+        $updated = false;
+        foreach ($rows as &$row) {
+            if (!is_array($row)) continue;
+            if ((int)($row['var_id'] ?? 0) === $vid) {
+                $row['register'] = $reg;
+                $row['var_id'] = $vid;
+                $row['instance_id'] = $iid; // keep it even if 0, but normally >0
+                $updated = true;
+                break;
+            }
+        }
+        unset($row);
+
+        if (!$updated) {
+            $rows[] = [
+                'register' => $reg,
+                'var_id' => $vid,
+                'instance_id' => $iid
+            ];
+        }
+
+        $this->WriteAttributeString($listName, json_encode($rows, JSON_UNESCAPED_SLASHES));
+
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_DISCOVERY,
+            "💾 Stored select selection (var_id=$vid instance_id=$iid register=" . ($reg ? 'true' : 'false') . ")",
+            0
+        );
+    }
+
     /**
      * Applies cached register-state from an attribute to freshly built popup rows.
      *
@@ -9132,9 +9185,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_climate_suggestions',
                             'caption' => '🔥 Climate (Thermostat)',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
                             'add' => false,
@@ -9147,9 +9200,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_cover_suggestions',
                             'caption' => '🪟 Cover (Roller Blind)',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
                             'add' => false,
@@ -9178,9 +9231,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_media_suggestions',
                             'caption' => '🎵 Media Player',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
                             'add' => false,
@@ -9193,9 +9246,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_remote_suggestions',
                             'caption' => '🎮 Remote Device',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
                             'add' => false,
@@ -9208,9 +9261,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_sensor_suggestions',
                             'caption' => '📈 Sensor',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox'], 'save' => true],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px', 'save' => true],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox'], 'save' => true],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox'], 'save' => true],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto', 'save' => true],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox'], 'save' => true],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                                 ['caption' => 'Var ID', 'name' => 'var_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
@@ -9224,9 +9277,9 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_switch_suggestions',
                             'caption' => '💡 Switch (Binary)',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
                             'add' => false,
@@ -9239,16 +9292,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                             'name' => 'popup_select_suggestions',
                             'caption' => '🔽 Select',
                             'columns' => [
-                                ['caption' => 'Register', 'name' => 'register', 'width' => '140px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
-                                ['caption' => '📦 Object', 'name' => 'label', 'width' => '200px'],
-                                ['caption' => 'Name', 'name' => 'name', 'width' => 'auto', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
+                                ['caption' => 'Register', 'name' => 'register', 'width' => '125px', 'add' => false, 'edit' => ['type' => 'CheckBox']],
+                                ['caption' => '📦 Object', 'name' => 'label', 'width' => 'auto'],
+                                ['caption' => 'Name', 'name' => 'name', 'width' => '300px', 'add' => '', 'edit' => ['type' => 'ValidationTextBox']],
                                 ['caption' => 'Instance ID', 'name' => 'instance_id', 'width' => '10px', 'visible' => false, 'save' => true],
                                 ['caption' => 'Var ID', 'name' => 'var_id', 'width' => '10px', 'visible' => false, 'save' => true],
                             ],
                             'add' => false,
                             'delete' => false,
                             'rowCount' => 8,
-                            'onEdit' => 'UCR_StorePopupSensorSelection($id, (string)$popup_select_suggestions["register"], (string)$popup_select_suggestions["instance_id"], (string)$popup_select_suggestions["var_id"]);'
+                            'onEdit' => 'UCR_StorePopupSelectSelection($id, (string)$popup_select_suggestions["register"], (string)$popup_select_suggestions["instance_id"], (string)$popup_select_suggestions["var_id"]);'
                         ]
                     ],
                     'buttons' => [
