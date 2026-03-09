@@ -97,7 +97,7 @@ trait DebugTrait
      * Structured debug output with topic/level filtering and throttling.
      * Lowest level is BASIC (1). There is no OFF level.
      */
-    public function Debug(string $Message, int $Level, string $Topic, $Data, int $Format = 0): bool
+    public function Debug(string $Message, int $Level, string $Topic, string $Data, int $Format = 0): bool
     {
         // If expert debug is OFF: classic behavior, but respect debug_level threshold.
         if (!(bool)$this->ReadPropertyBoolean('expert_debug')) {
@@ -436,11 +436,11 @@ trait DebugTrait
         $this->Debug(__FUNCTION__, self::LV_BASIC, self::TOPIC_GEN, '🧪 BASIC test output', 0);
         $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_WS, '📤 Simulated transmit to 192.168.0.50:12345', 0);
 
-        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, [
+        $this->Debug(__FUNCTION__, self::LV_INFO, self::TOPIC_ENTITY, json_encode([
             'entity_id' => 'sensor_12345',
             'value' => 42,
             'unit' => '°C'
-        ], 0);
+        ]), 0);
 
         $this->Debug(__FUNCTION__, self::LV_ERROR, self::TOPIC_AUTH, '❌ Simulated auth error', 0);
         $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_VM, '🔁 High frequency event simulation', 0);

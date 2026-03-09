@@ -770,7 +770,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         if (is_numeric($varId) && @IPS_VariableExists($varId)) {
                             $value = @GetValue($varId);
                             $attributes['state'] = $value ? 'ON' : 'OFF';
-                            $this->SendEntityChange('switch_' . $entry['instance_id'], 'switch', $attributes);
+                            $this->SendEntityChange($this->BuildSwitchEntityId($entry), 'switch', $attributes);
                         }
                         break;
 
@@ -2081,6 +2081,16 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         }
                         break;
 
+                    case 'switch':
+                        if (!isset($entry['var_id']) || !is_numeric($entry['var_id'])) {
+                            continue 2;
+                        }
+                        $entityId = $this->BuildSwitchEntityId($entry);
+                        $features = [
+                            Entity_Switch::FEATURE_ON_OFF
+                        ];
+                        break;
+
                     case 'cover':
                         if (!isset($entry['instance_id']) && !isset($entry['position_var_id'])) continue 2;
                         $entityId = 'cover_' . $entry['instance_id'];
@@ -2259,7 +2269,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     $state = @GetValue($varId);
                     $stateStr = ($state) ? 'ON' : 'OFF';
                     $entities[] = [
-                        'entity_id' => 'switch_' . (int)$entry['instance_id'],
+                        'entity_id' => $this->BuildSwitchEntityId($entry),
                         'entity_type' => 'switch',
                         'attributes' => [
                             Entity_Switch::ATTR_STATE => $stateStr
@@ -5270,29 +5280,54 @@ class Remote3IntegrationDriver extends IPSModuleStrict
         IPS_SemaphoreLeave($lockName);
     }
 
+    private function BuildSwitchEntityId(array $entry): string
+    {
+        return 'switch_' . (int)($entry['var_id'] ?? 0);
+    }
+
+    private function ParseSwitchEntityId(string $entityId): ?int
+    {
+        if (!preg_match('/^switch_(\d+)$/', $entityId, $match)) {
+            return null;
+        }
+
+        return (int)$match[1];
+    }
+
     private function HandleSwitchCommand(array $msgData, $clientIP, $clientPort, $reqId): void
     {
         $entityId = $msgData['entity_id'] ?? '';
         $cmdId = $msgData['cmd_id'] ?? '';
 
         // Semaphore Lock hinzufügen
-        if (preg_match('/_(\d+)$/', $entityId, $match)) {
-            $objectId = (int)$match[1];
-            $lockName = 'UCR_' . $objectId;
-        } else {
-            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Could not extract object ID from entity ID: $entityId", 0);
+        $varIdFromEntity = $this->ParseSwitchEntityId($entityId);
+        if ($varIdFromEntity === null) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Could not extract var_id from switch entity ID: $entityId", 0);
             return;
         }
+
+        $lockName = 'UCR_' . $varIdFromEntity;
         if (!IPS_SemaphoreEnter($lockName, 5000)) {
             $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "❌ Semaphore '$lockName' could not be acquired (timeout)", 0);
             return;
         }
         $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "🔌 Switch-Command: $cmdId for $entityId", 0);
         $mapping = json_decode($this->ReadPropertyString('switch_mapping'), true);
+        if (!is_array($mapping)) {
+            $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ switch_mapping is invalid", 0);
+            IPS_SemaphoreLeave($lockName);
+            return;
+        }
         foreach ($mapping as $entry) {
-            if ('switch_' . $entry['instance_id'] === $entityId) {
+            if ($this->BuildSwitchEntityId($entry) === $entityId) {
                 $varId = (int)$entry['var_id'];
+                if ($varId !== $varIdFromEntity) {
+                    $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Switch entity var_id mismatch for $entityId | mapping var_id=$varId", 0);
+                    IPS_SemaphoreLeave($lockName);
+                    return;
+                }
                 $current = @GetValue($varId);
+                $newState = null;
 
                 if ($cmdId === 'on') {
                     $newState = true;
@@ -5302,7 +5337,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                     if (is_bool($current)) {
                         $newState = !$current;
                     } else {
-                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Current value is not boolean: $current", 0);
+                        $this->Debug(__FUNCTION__, self::LV_WARN, self::TOPIC_ENTITY, "⚠️ Current value is not boolean: " . json_encode($current), 0);
                         IPS_SemaphoreLeave($lockName);
                         return;
                     }
@@ -5473,7 +5508,7 @@ class Remote3IntegrationDriver extends IPSModuleStrict
 
                     $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "✅ Switch mapping found for VarID $varId → State: $stateStr", 0);
 
-                    $mappedEntityId = 'switch_' . (string)$entry['instance_id'];
+                    $mappedEntityId = $this->BuildSwitchEntityId($entry);
 
                     $event = [
                         'kind' => 'event',
@@ -6126,14 +6161,14 @@ class Remote3IntegrationDriver extends IPSModuleStrict
                         'cat' => 'ENTITY',
                         'msg_data' => [
                             'entity_type' => 'switch',
-                            'entity_id' => 'switch_' . (string)$switch['instance_id'],
+                            'entity_id' => $this->BuildSwitchEntityId($switch),
                             'attributes' => [
                                 'state' => $state
                             ]
                         ]
                     ];
 
-                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for switch_" . (string)$switch['instance_id'] . " to $clientIP:$port", 0);
+                    $this->Debug(__FUNCTION__, self::LV_TRACE, self::TOPIC_ENTITY, "📤 Online event for " . $this->BuildSwitchEntityId($switch) . " to " . $clientIP . ":" . $port, 0);
                     $this->PushToRemoteClient($event, $clientIP, $port);
                 }
             }
